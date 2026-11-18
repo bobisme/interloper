@@ -6,7 +6,8 @@
 //! `never.gonna.give.you.up...` address; both mean the token was refused, so
 //! both are the solver's fault.
 //!
-//! The inbox is keyed on the CodeIgniter `ci_session` cookie: on a shared jar
+//! The inbox is keyed on a session cookie, `_session` since 2026-11 (it was
+//! CodeIgniter's `ci_session`; either is accepted): on a shared jar
 //! a second create hands back the first address. So every request runs on a
 //! fresh session and the cookie travels in Address::state; whoever holds it
 //! reads the mail. A session the site no longer knows gets an empty body from
@@ -37,7 +38,8 @@ const NAME: &str = "etempmail";
 const SITE: &str = "https://etempmail.com";
 const PAGE: &str = "https://etempmail.com/";
 const SITEKEY: &str = "0x4AAAAAADgCwAbwHVdgg5az";
-const COOKIE: &str = "ci_session";
+/// Session cookie names, newest first. The state records which one it holds.
+const COOKIES: &[&str] = &["_session", "ci_session"];
 const DOMAINS: &[&str] = &["temporarmail.edu.pl", "mats.edu.pl", "securemail.edu.pl"];
 /// The page counts an address down from `creation_time` over `data-minutes`.
 const LIFE_MINUTES: u64 = 20;
@@ -106,14 +108,19 @@ impl ETempMail {
             .state
             .as_deref()
             .and_then(|st| serde_json::from_str::<Value>(st).ok())
-            .and_then(|v| v.get(COOKIE).and_then(Value::as_str).map(String::from))
+            .and_then(|v| {
+                COOKIES.iter().find_map(|k| {
+                    let value = v.get(*k)?.as_str()?;
+                    Some((*k, value.to_string()))
+                })
+            })
             .ok_or_else(|| {
                 Error::unsupported("etempmail needs the session cookie issued by generate()")
             })?;
         let body = self
             .http
             .post(format!("{SITE}/getInbox"))
-            .cookie(COOKIE, session)
+            .cookie(session.0, session.1)
             .text()
             .await?;
         if body.trim().is_empty() {
@@ -195,7 +202,10 @@ impl Provider for ETempMail {
             .filter(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit()))
             .and_then(|c| c.parse::<i64>().ok())
             .and_then(|c| Timestamp::from_second(c).ok());
-        let session = resp.cookie(COOKIE).filter(|c| !c.is_empty());
+        let session = COOKIES.iter().find_map(|k| {
+            let value = resp.cookie(k).filter(|c| !c.is_empty())?;
+            Some((*k, value))
+        });
         let (200, Some(address), Some(created), Some(session)) = (
             resp.status,
             address.filter(|a| a.contains('@')),
@@ -204,12 +214,12 @@ impl Provider for ETempMail {
         ) else {
             return Err(Error::drift(
                 NAME,
-                "'address', 'creation_time' and a ci_session cookie from create",
+                "'address', 'creation_time' and a session cookie from create",
                 data,
             ));
         };
         let mut a = Address::new(address, NAME)
-            .with_state(serde_json::to_string(&json!({COOKIE: session})).expect("serializes"));
+            .with_state(serde_json::to_string(&json!({session.0: session.1})).expect("serializes"));
         a.expires_at = created
             .checked_add(jiff::SignedDuration::from_mins(LIFE_MINUTES as i64))
             .ok();
@@ -248,6 +258,7 @@ mod tests {
     const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/etempmail");
     const EMAIL: &str = "hivxwx3mdh@temporarmail.edu.pl";
     const SESSION: &str = "SESSION-PLACEHOLDER";
+    const COOKIE: &str = "_session";
 
     const CREATE: &str = "POST https://etempmail.com/getEmailAddress";
     const INBOX: &str = "POST https://etempmail.com/getInbox";
@@ -295,7 +306,7 @@ mod tests {
     crate::contract_tests!(SPEC, build(&wire()));
 
     fn address() -> Address {
-        Address::new(EMAIL, NAME).with_state(json!({"ci_session": SESSION}).to_string())
+        Address::new(EMAIL, NAME).with_state(json!({COOKIE: SESSION}).to_string())
     }
 
     fn sent(w: &Fixtures, prefix: &str) -> Vec<HttpRequest> {
@@ -344,7 +355,7 @@ mod tests {
             .unwrap();
         assert_eq!(a.value, EMAIL);
         let st: Value = serde_json::from_str(a.state.as_deref().unwrap()).unwrap();
-        assert_eq!(st, json!({"ci_session": SESSION}));
+        assert_eq!(st, json!({COOKIE: SESSION}));
         assert_eq!(
             a.expires_at,
             Some(Timestamp::from_second(1790306080 + 20 * 60).unwrap())
@@ -365,6 +376,23 @@ mod tests {
             inbox
                 .iter()
                 .all(|r| r.cookies == [(COOKIE.to_string(), SESSION.to_string())])
+        );
+    }
+
+    #[tokio::test]
+    async fn the_older_ci_session_cookie_still_works_both_ways() {
+        let w = wire().route(
+            CREATE,
+            Reply::json(load("create.json")).set_cookie("ci_session", SESSION),
+        );
+        let p = build(&w);
+        let a = p.generate(&GenerateOptions::default()).await.unwrap();
+        let st: Value = serde_json::from_str(a.state.as_deref().unwrap()).unwrap();
+        assert_eq!(st, json!({"ci_session": SESSION}));
+        p.list(&a).await.unwrap();
+        assert_eq!(
+            sent(&w, INBOX)[0].cookies,
+            [("ci_session".to_string(), SESSION.to_string())]
         );
     }
 

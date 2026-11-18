@@ -105,8 +105,19 @@ impl Solver {
             .await
             .map_err(|e| Error::SolverUnavailable(format!("{path}: {e}")))?;
         if resp.status >= 300 {
+            // The solver explains a refusal as {"success":false,"message":..}:
+            // 400 a bad request, 429 every tab busy, 500 a solve that failed
+            // or timed out (its own `timeOut`, 29s by default).
+            let why = serde_json::from_str::<Value>(&resp.text)
+                .ok()
+                .and_then(|v| {
+                    v.get("message")?
+                        .as_str()
+                        .map(|m| format!(": {}", clip(m, 200)))
+                })
+                .unwrap_or_default();
             return Err(Error::SolverUnavailable(format!(
-                "{path}: HTTP {}",
+                "{path}: HTTP {}{why}",
                 resp.status
             )));
         }
@@ -209,6 +220,51 @@ mod tests {
             s.clearance("u").await,
             Err(Error::SolverUnavailable(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_carries_the_solvers_message() {
+        // The solver's real error shape (server.rs json_error).
+        let wire = Fixtures::new().route(
+            "/turnstile",
+            Reply::json(json!({"success": false, "message": "websocket read timed out"}))
+                .with_status(500),
+        );
+        let err = Solver::with_backend("http://s.test", wire)
+            .turnstile("https://x.test", "k", None, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::SolverUnavailable(m) if m == "/turnstile: HTTP 500: websocket read timed out"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parses_the_solvers_real_iuam_answer() {
+        // Shape from a live /iuam at ce75d71 (values replaced).
+        let wire = Fixtures::new().route(
+            "/iuam",
+            Reply::json(json!({
+                "headers": {
+                    "Cookie": "cf_clearance=CLR.a=b-c;",
+                    "User-Agent": "Mozilla/5.0 (Linux; Android 16; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.178 Mobile Safari/537.36"
+                },
+                "ip": "192.0.2.1",
+                "elapsed": "1.21s",
+                "elapsed_ms": 1210,
+                "status": "completed"
+            })),
+        );
+        let c = Solver::with_backend("http://s.test", wire)
+            .clearance("https://x.test/")
+            .await
+            .unwrap();
+        assert_eq!(
+            c.cookies,
+            [("cf_clearance".to_string(), "CLR.a=b-c".to_string())]
+        );
+        assert!(c.user_agent.contains("Chrome/148"));
     }
 
     #[test]

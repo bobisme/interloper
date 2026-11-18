@@ -466,7 +466,7 @@ impl Transport {
             Err(Error::Challenge { .. }) if self.solver.is_some() && host.is_some() => {
                 let (scheme, host) = host.expect("checked");
                 let fresh = self
-                    .refresh_clearance(&scheme, &host, used.as_ref())
+                    .refresh_clearance(&solve_page(&req, &scheme, &host), &host, used.as_ref())
                     .await?;
                 let result = self.attempts(cleared(&req, Some(&fresh))).await;
                 if matches!(result, Err(Error::Challenge { .. })) {
@@ -489,7 +489,7 @@ impl Transport {
 
     async fn refresh_clearance(
         &self,
-        scheme: &str,
+        page: &str,
         host: &str,
         used: Option<&Arc<Clearance>>,
     ) -> Result<Arc<Clearance>> {
@@ -500,9 +500,7 @@ impl Transport {
             return Ok(current); // a concurrent request already re-solved
         }
         let solver = self.solver.as_ref().expect("checked by caller");
-        // The origin, not the request URL: the solver's browser must not GET
-        // a POST-only API route.
-        let fresh = Arc::new(solver.clearance(&format!("{scheme}://{host}/")).await?);
+        let fresh = Arc::new(solver.clearance(page).await?);
         self.clearances
             .lock()
             .unwrap()
@@ -544,14 +542,67 @@ impl Transport {
     }
 }
 
+/// The page the solver's browser loads to earn a clearance for `req`. A GET
+/// is loaded as is: a site may challenge only its API paths (10minutemail
+/// serves `/` unchallenged and challenges `/session/address`), and a browser
+/// sent to an unchallenged page solves nothing. Any other method gets the
+/// origin, since the browser must not GET a POST-only route.
+fn solve_page(req: &HttpRequest, scheme: &str, host: &str) -> String {
+    if req.method == Method::Get {
+        req.full_url()
+    } else {
+        format!("{scheme}://{host}/")
+    }
+}
+
 fn cleared(req: &HttpRequest, clearance: Option<&Clearance>) -> HttpRequest {
     let mut req = req.clone();
     if let Some(c) = clearance {
         req.cookies.extend(c.cookies.iter().cloned());
         // The clearance's User-Agent wins: the cookie is void under any other.
         req.set_header("User-Agent", c.user_agent.clone());
+        for (k, v) in client_hints(&c.user_agent) {
+            req.set_header(k, v);
+        }
     }
     req
+}
+
+/// The User-Agent Client Hints a Chrome with this User-Agent sends. The
+/// impersonated client otherwise sends macOS Chrome 149 hints beside the
+/// solver's Android Chrome User-Agent, a contradiction no real browser makes.
+/// The brand list is the solver's own for its IUAM profile. Empty for a
+/// non-Chrome UA.
+fn client_hints(ua: &str) -> Vec<(&'static str, String)> {
+    let Some(major) = ua
+        .split_once("Chrome/")
+        .and_then(|(_, v)| v.split('.').next())
+        .filter(|m| !m.is_empty() && m.bytes().all(|b| b.is_ascii_digit()))
+    else {
+        return vec![];
+    };
+    let platform = if ua.contains("Android") {
+        "Android"
+    } else if ua.contains("Windows") {
+        "Windows"
+    } else if ua.contains("Macintosh") {
+        "macOS"
+    } else if ua.contains("CrOS") {
+        "Chrome OS"
+    } else {
+        "Linux"
+    };
+    let mobile = if ua.contains("Mobile") { "?1" } else { "?0" };
+    vec![
+        (
+            "sec-ch-ua",
+            format!(
+                "\"Chromium\";v=\"{major}\", \"Google Chrome\";v=\"{major}\", \"Not(A:Brand\";v=\"99\""
+            ),
+        ),
+        ("sec-ch-ua-mobile", mobile.to_string()),
+        ("sec-ch-ua-platform", format!("\"{platform}\"")),
+    ]
 }
 
 /// A request being built against a [`Transport`].
@@ -800,6 +851,85 @@ mod tests {
         // Second request reuses the clearance without another solve.
         t.get("https://x.test/api").json().await.unwrap();
         assert_eq!(solver_wire.seen().len(), 1);
+    }
+
+    fn solver_asked(solver_wire: &Fixtures) -> Vec<String> {
+        solver_wire
+            .seen()
+            .iter()
+            .map(|r| {
+                let Body::Json(b) = &r.body else { panic!() };
+                b["url"].as_str().unwrap().to_string()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_challenged_get_is_solved_on_its_own_url_and_other_methods_on_the_origin() {
+        let solver_wire = Fixtures::new().route(
+            "/iuam",
+            Reply::json(serde_json::json!({"headers": {"Cookie": "cf_clearance=abc;", "User-Agent": "UA/1"}})),
+        );
+        let f = Fixtures::new()
+            .route("cf_clearance=abc", Reply::json(serde_json::json!({})))
+            .route(
+                "x.test",
+                Reply::status(403).header("cf-mitigated", "challenge"),
+            )
+            .route(
+                "y.test",
+                Reply::status(403).header("cf-mitigated", "challenge"),
+            );
+        let t = transport(&f).solver(Some(Solver::with_backend(
+            "http://solver.test",
+            solver_wire.clone(),
+        )));
+        t.get("https://x.test/session/address")
+            .query("a", "1")
+            .json()
+            .await
+            .unwrap();
+        t.post("https://y.test/api/create").json().await.unwrap();
+        assert_eq!(
+            solver_asked(&solver_wire),
+            ["https://x.test/session/address?a=1", "https://y.test/"]
+        );
+    }
+
+    #[test]
+    fn clearance_replays_client_hints_that_match_its_user_agent() {
+        let ua = "Mozilla/5.0 (Linux; Android 16; K) AppleWebKit/537.36 (KHTML, like Gecko) \
+                  Chrome/148.0.7778.178 Mobile Safari/537.36";
+        let c = Clearance {
+            cookies: vec![("cf_clearance".into(), "abc".into())],
+            user_agent: ua.into(),
+        };
+        let mut req = HttpRequest {
+            method: Method::Get,
+            url: "https://x.test/".into(),
+            query: vec![],
+            headers: vec![("sec-ch-ua-mobile".into(), "?0".into())],
+            cookies: vec![],
+            body: Body::Empty,
+            follow_redirects: true,
+        };
+        req = cleared(&req, Some(&c));
+        assert_eq!(req.header("user-agent"), Some(ua));
+        assert_eq!(
+            req.header("sec-ch-ua"),
+            Some(r#""Chromium";v="148", "Google Chrome";v="148", "Not(A:Brand";v="99""#)
+        );
+        assert_eq!(req.header("sec-ch-ua-mobile"), Some("?1"));
+        assert_eq!(req.header("sec-ch-ua-platform"), Some(r#""Android""#));
+        assert_eq!(
+            client_hints(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/147.0.0.0 Safari/537.36"
+            )[2]
+            .1,
+            r#""Windows""#
+        );
+        assert!(client_hints("UA/1").is_empty());
+        assert!(client_hints("Firefox/140.0").is_empty());
     }
 
     #[tokio::test]

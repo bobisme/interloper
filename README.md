@@ -164,7 +164,7 @@ works with its connection string as given.
 | env | |
 |---|---|
 | `INTERLOPER_PROXY` | egress proxy for every provider (and the solver) |
-| `INTERLOPER_SOLVER_URL` | a [cloudflare-solver](https://github.com/B00H0O/cloudflare-solver); solver-only providers join the pool when set |
+| `INTERLOPER_SOLVER_URL` | a [cloudflare-solver](https://github.com/B00H0O/cloudflare-solver); solver-only providers join the pool when set. Build it with `podman build -t il-solver deploy/solver` (pins Chrome 148; upstream's Dockerfile now installs a Chrome that breaks Turnstile) |
 | `INTERLOPER_HEALTH_PATH` | health cache (default `$XDG_STATE_HOME/interloper/health.json`) |
 | `INTERLOPER_LOG` | tracing filter, e.g. `interloper=debug` |
 | `INTERLOPER_JSON` | `1` turns on `--json` for every command |
