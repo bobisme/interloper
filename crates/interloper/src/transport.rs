@@ -200,6 +200,10 @@ impl WreqBackend {
         let mut b = wreq::Client::builder()
             .emulation(wreq_util::Emulation::Chrome149)
             .cookie_store(cookies)
+            // Follow redirects like the browser being impersonated (and like
+            // cowbird's curl_cffi). Without this a backend moving hosts with a
+            // 301 surfaced as a non-JSON body and quarantined a correct adapter.
+            .redirect(wreq::redirect::Policy::limited(10))
             .timeout(config.timeout);
         if let Some(p) = &config.proxy {
             b = b.proxy(wreq::Proxy::all(p.as_str()).map_err(|e| Error::down("transport", e))?);
@@ -577,7 +581,8 @@ impl Req<'_> {
         let resp = self.send_json().await?;
         match serde_json::from_str(&resp.text) {
             Ok(v) => Ok(v),
-            Err(_) if resp.status >= 400 => {
+            // An error page or an unfollowed redirect: an outage, not drift.
+            Err(_) if resp.status >= 300 => {
                 Err(Error::down(&provider, format!("HTTP {}", resp.status)))
             }
             Err(_) => Err(Error::drift(
@@ -691,6 +696,20 @@ mod tests {
     #[tokio::test]
     async fn non_json_error_page_is_down_not_drift() {
         let f = Fixtures::new().route("x.test", Reply::text("<html>blocked").with_status(403));
+        let err = transport(&f)
+            .get("https://x.test/")
+            .json()
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::ProviderDown { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn unfollowed_redirect_is_down_not_drift() {
+        let f = Fixtures::new().route(
+            "x.test",
+            Reply::text("<a href=/>moved</a>").with_status(301),
+        );
         let err = transport(&f)
             .get("https://x.test/")
             .json()
