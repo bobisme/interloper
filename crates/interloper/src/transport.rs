@@ -63,6 +63,9 @@ pub struct HttpRequest {
     pub headers: Vec<(String, String)>,
     pub cookies: Vec<(String, String)>,
     pub body: Body,
+    /// Follow 3xx like a browser. Off for the rare request whose answer is
+    /// the redirect itself (a cookie set on a 302).
+    pub follow_redirects: bool,
 }
 
 impl HttpRequest {
@@ -236,6 +239,9 @@ impl Backend for WreqBackend {
             Method::Delete => wreq::Method::DELETE,
         };
         let mut rb = client.request(method, req.full_url());
+        if !req.follow_redirects {
+            rb = rb.redirect(wreq::redirect::Policy::none());
+        }
         for (k, v) in &req.headers {
             rb = rb.header(k.as_str(), v.as_str());
         }
@@ -386,6 +392,7 @@ impl Transport {
                 headers: Vec::new(),
                 cookies: Vec::new(),
                 body: Body::Empty,
+                follow_redirects: true,
             },
         }
     }
@@ -519,6 +526,12 @@ impl Req<'_> {
 
     pub fn header(mut self, k: impl AsRef<str>, v: impl Into<String>) -> Self {
         self.req.set_header(k.as_ref(), v.into());
+        self
+    }
+
+    /// Answer with the 3xx itself instead of following it.
+    pub fn no_redirect(mut self) -> Self {
+        self.req.follow_redirects = false;
         self
     }
 

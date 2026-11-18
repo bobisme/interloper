@@ -5,21 +5,26 @@ pub mod cftempmail;
 pub mod disposablemail;
 pub mod duckmail;
 pub mod emailnator;
+pub mod emailtemp;
 pub mod etempmail;
 pub mod eyepaste;
 pub mod guerrillamail;
 pub mod inboxes;
 pub mod inboxkitten;
+pub mod instantedumail;
 pub mod mailcx;
 pub mod maildrop;
 pub mod mailticking;
 pub mod mailtm;
+pub mod mtempmail;
 pub mod nicemail;
 pub mod re146;
+pub mod receivemail;
 pub mod reusableemail;
 pub mod smailpro;
 pub mod tempmailhub;
 pub mod tempmailio;
+pub mod tempmailo;
 pub mod tempmailorg;
 pub mod tempmailplus;
 pub mod temporarymail;
@@ -39,21 +44,26 @@ pub fn all() -> Vec<ProviderSpec> {
         disposablemail::SPEC,
         duckmail::SPEC,
         emailnator::SPEC,
+        emailtemp::SPEC,
         etempmail::SPEC,
         eyepaste::SPEC,
         guerrillamail::SPEC,
         inboxes::SPEC,
         inboxkitten::SPEC,
+        instantedumail::SPEC,
         mailcx::SPEC,
         maildrop::SPEC,
         mailticking::SPEC,
         mailtm::SPEC,
+        mtempmail::SPEC,
         nicemail::SPEC,
         re146::SPEC,
+        receivemail::SPEC,
         reusableemail::SPEC,
         smailpro::SPEC,
         tempmailhub::SPEC,
         tempmailio::SPEC,
+        tempmailo::SPEC,
         tempmailorg::SPEC,
         tempmailplus::SPEC,
         temporarymail::SPEC,

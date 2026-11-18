@@ -97,6 +97,7 @@ impl Solver {
             headers: vec![("Accept".into(), "application/json".into())],
             cookies: vec![],
             body: Body::Json(Value::Object(body)),
+            follow_redirects: true,
         };
         let resp = self
             .backend
