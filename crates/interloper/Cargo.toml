@@ -24,6 +24,7 @@ url.workspace = true
 urlencoding.workspace = true
 wreq.workspace = true
 wreq-util.workspace = true
+mail-parser = { version = "1.0.1", default-features = false }
 
 [features]
 # Tests that reach real backends. Off by default: `cargo test --features live`.
