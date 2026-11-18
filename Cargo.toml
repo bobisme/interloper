@@ -1,6 +1,36 @@
-[package]
-name = "interloper"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+rust-version = "1.90"
 
-[dependencies]
+[workspace.dependencies]
+interloper = { path = "crates/interloper" }
+async-trait = "0.1.89"
+async-stream = "0.3"
+base64 = "0.22"
+clap = { version = "4.6", features = ["derive", "env"] }
+futures = "0.3.31"
+jiff = { version = "1.0", features = ["serde"] }
+rand = "0.9"
+regex = "1.11"
+scraper = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+wreq = { version = "6.0.0-rc.31", features = ["json", "cookies", "form", "gzip", "brotli", "deflate", "zstd"] }
+wreq-util = "3.0.0-rc.14"
+urlencoding = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

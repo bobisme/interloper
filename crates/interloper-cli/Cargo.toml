@@ -1,0 +1,19 @@
+[package]
+name = "interloper-cli"
+description = "The interloper command: disposable inboxes from the shell."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "interloper"
+path = "src/main.rs"
+
+[dependencies]
+interloper.workspace = true
+clap.workspace = true
+futures.workspace = true
+jiff.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
