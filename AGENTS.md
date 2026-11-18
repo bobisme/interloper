@@ -1,0 +1,2 @@
+- Use bones (`bn --help`) to track all work.
+- All work should be done in ephemeral maw workspaces (`maw --help`).
