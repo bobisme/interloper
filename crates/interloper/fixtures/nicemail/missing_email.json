@@ -1,0 +1,7 @@
+{
+  "error": true,
+  "url": "https://mailporary.com/api/mail/messages",
+  "statusCode": 400,
+  "statusMessage": "Missing required query parameter: email",
+  "message": "Missing required query parameter: email"
+}
