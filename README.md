@@ -128,8 +128,12 @@ created on startup. `compose.yaml` runs Postgres and two servers.
   peers, not local measurements, are what keeps a provider out.
 
 cowbird shared quarantine but not DOWN, so each instance paid its own failed
-calls to learn a provider had died. Plain TCP only: keep Postgres on a
-private network.
+calls to learn a provider had died.
+
+TLS follows the URL's `sslmode` like libpq: `prefer` (default) uses TLS when
+offered, `require` refuses plaintext, `disable` never tries. Certificates are
+verified against Mozilla's roots, so managed Postgres (Neon, Supabase, RDS)
+works with its connection string as given.
 
 ## What is better than cowbird
 

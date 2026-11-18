@@ -35,6 +35,10 @@ wreq-util = "3.0.0-rc.14"
 urlencoding = "2"
 tokio-postgres = { version = "0.7.18", features = ["with-serde_json-1"] }
 deadpool-postgres = "0.14"
+tokio-postgres-rustls = { version = "0.14", features = ["ring"] }
+# ring, not aws-lc: aws-lc and wreq's BoringSSL export clashing symbols.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 
 [profile.release]
 lto = "thin"

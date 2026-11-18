@@ -108,7 +108,7 @@ pub const ENV: &[(&str, &str)] = &[
     ),
     (
         "INTERLOPER_DATABASE_URL",
-        "Postgres URL: shared address store plus fleet health sync. Excludes INTERLOPER_DATABASE.",
+        "Postgres URL: shared address store plus fleet health sync; TLS per ?sslmode= (verified). Excludes INTERLOPER_DATABASE.",
     ),
     (
         "INTERLOPER_INSTANCE_ID",

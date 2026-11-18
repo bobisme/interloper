@@ -14,14 +14,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use interloper::Address;
 use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, params};
-use tokio_postgres::NoTls;
 
 #[derive(Debug)]
 pub struct StoreUnavailable(pub String);
@@ -77,6 +76,22 @@ pub enum Store {
     Postgres(Pool),
 }
 
+fn tls_connector() -> tokio_postgres_rustls::MakeRustlsConnect {
+    // An explicit provider: the process-wide default is never installed, and
+    // installing one here could race with anything else that does.
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring supports the default protocol versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    tokio_postgres_rustls::MakeRustlsConnect::new(config)
+}
+
 impl Store {
     pub fn memory() -> Self {
         Store::Memory(Mutex::new(HashMap::new()))
@@ -101,8 +116,13 @@ impl Store {
     }
 
     /// Connect, and create the schema if it is missing. Fails rather than
-    /// starting a server whose every request would 503. Plain TCP only: run
-    /// Postgres on a private network or behind a TLS-terminating proxy.
+    /// starting a server whose every request would 503.
+    ///
+    /// TLS follows the URL's `sslmode`, as libpq does: `prefer` (the default)
+    /// uses TLS when the server offers it, `require` refuses plaintext, and
+    /// `disable` never tries. TLS always verifies the certificate and host
+    /// name against Mozilla's roots, so a managed database (Neon, Supabase,
+    /// RDS, ...) works with its URL as given.
     pub async fn postgres(url: &str) -> Result<Self, String> {
         let mut cfg = tokio_postgres::Config::from_str(url).map_err(|e| e.to_string())?;
         if cfg.get_connect_timeout().is_none() {
@@ -110,7 +130,7 @@ impl Store {
         }
         let mgr = Manager::from_config(
             cfg,
-            NoTls,
+            tls_connector(),
             ManagerConfig {
                 recycling_method: RecyclingMethod::Fast,
             },
@@ -122,7 +142,23 @@ impl Store {
             .create_timeout(Some(ACQUIRE_TIMEOUT))
             .build()
             .map_err(|e| e.to_string())?;
-        let client = pool.get().await.map_err(|e| e.to_string())?;
+        let client = pool.get().await.map_err(|e| {
+            // deadpool's Display hides the cause, which is the useful part.
+            let mut msg = e.to_string();
+            let mut src = std::error::Error::source(&e);
+            while let Some(c) = src {
+                msg.push_str(": ");
+                msg.push_str(&c.to_string());
+                src = c.source();
+            }
+            if msg.contains("TLS") || msg.contains("certificate") {
+                msg.push_str(
+                    " (the server's certificate must chain to a public CA; on a private \
+                     network use ?sslmode=disable)",
+                );
+            }
+            msg
+        })?;
         // Two instances booting at once may both run this, and `if not
         // exists` still races on the catalog. Separate statements, so the
         // schema commits before the lock is released.
