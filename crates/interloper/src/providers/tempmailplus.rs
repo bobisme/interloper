@@ -28,7 +28,6 @@ const DOMAINS: &[&str] = &[
     "fexbox.org",
     "mailbox.in.ua",
     "rover.info",
-    "chitthi.in",
     "fextemp.com",
     "any.pink",
     "merepost.com",

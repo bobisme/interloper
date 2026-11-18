@@ -53,7 +53,15 @@ pub const CAPS: Capabilities = Capabilities {
 pub const SPEC: ProviderSpec = ProviderSpec {
     name: "tempmailo",
     caps: CAPS,
-    build: |t| Arc::new(TempMailo { http: t }),
+    // Every call is a page fetch plus one API call bound to the antiforgery
+    // cookie that page set. A shared jar lets concurrent calls overwrite each
+    // other's cookie, and the loser gets an empty 400 (seen live, 3 at once).
+    // So each request carries only the cookies passed to it explicitly.
+    build: |t| {
+        Arc::new(TempMailo {
+            http: t.fresh_session(true),
+        })
+    },
 };
 
 pub struct TempMailo {
@@ -83,9 +91,8 @@ impl TempMailo {
                 )
             })?;
         let mut r = req(&self.http).header("RequestVerificationToken", token);
-        // The site sets its antiforgery cookie once; after that the
-        // transport's cookie jar carries it and the home page sends no
-        // Set-Cookie.
+        // With no jar the page sets the antiforgery cookie every time, and
+        // this call replays exactly the cookie its token is bound to.
         for (k, v) in home.cookies() {
             r = r.cookie(k, v);
         }
@@ -95,6 +102,14 @@ impl TempMailo {
                 provider: "tempmailo".into(),
                 retry_after: None,
             });
+        }
+        // A refusal (token race, WAF, outage) is not a new response shape:
+        // it must not quarantine the adapter.
+        if resp.status >= 300 {
+            return Err(Error::down(
+                "tempmailo",
+                format!("HTTP {}: {}", resp.status, clip(&resp.text, 200)),
+            ));
         }
         if resp.status != 200 {
             return Err(Error::drift(
@@ -255,10 +270,9 @@ mod tests {
             .route(&list_key(EMPTY), Reply::json(json!([])))
     }
 
+    // Through SPEC.build, so tests see the transport the registry ships.
     fn build(w: &Arc<Fixtures>) -> Arc<dyn Provider> {
-        Arc::new(TempMailo {
-            http: w.transport("tempmailo", &CAPS),
-        })
+        (SPEC.build)(w.transport("tempmailo", &CAPS))
     }
 
     fn with(key: &str, reply: Reply) -> Arc<dyn Provider> {
@@ -380,21 +394,31 @@ mod tests {
 
     #[tokio::test]
     async fn a_page_that_sets_no_new_cookie_still_reads_the_inbox() {
-        // The transport keeps one cookie jar per provider, and the site sets
-        // the antiforgery cookie only once: from the second call on, the home
-        // page answers without Set-Cookie and the jar supplies it.
+        // Tolerated, not expected: with no jar the live site sets the cookie
+        // on every page fetch.
         let rows = with(HOME, Reply::text(home())).list(&full()).await.unwrap();
         assert!(!rows.is_empty());
     }
 
     #[tokio::test]
-    async fn a_refused_token_is_drift() {
-        // A token without its cookie gets a bare 400.
+    async fn a_refused_token_is_down_not_drift() {
+        // A token whose cookie was replaced gets a bare 400. Live, this was a
+        // race between concurrent calls: transient, so never a quarantine.
         let p = with(&list_key(FULL), Reply::status(400));
         assert!(matches!(
             p.list(&full()).await,
-            Err(Error::SchemaDrift { .. })
+            Err(Error::ProviderDown { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn every_request_skips_the_shared_jar() {
+        // Concurrent calls must not trade antiforgery cookies.
+        let w = wire().route(HOME, Reply::text(home()));
+        let p = build(&w);
+        let _ = p.list(&full()).await;
+        let flags = w.fresh_flags();
+        assert!(!flags.is_empty() && flags.iter().all(|f| *f), "{flags:?}");
     }
 
     #[tokio::test]
