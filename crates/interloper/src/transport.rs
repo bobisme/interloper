@@ -129,9 +129,12 @@ impl HttpResponse {
             .collect()
     }
 
+    /// The value a browser would now hold: when a redirect chain sets the
+    /// same cookie twice, the later hop wins.
     pub fn cookie(&self, name: &str) -> Option<String> {
         self.cookies()
             .into_iter()
+            .rev()
             .find(|(k, _)| k == name)
             .map(|(_, v)| v)
     }
@@ -190,19 +193,44 @@ impl NetConfig {
 /// Real HTTP with a Chrome TLS and HTTP/2 fingerprint.
 pub struct WreqBackend {
     shared: wreq::Client,
-    config: NetConfig,
+    jar: Arc<wreq::cookie::Jar>,
+}
+
+/// One request's view of a cookie store. It forwards to the real store (the
+/// shared jar, or a throwaway one for a fresh session) and records every
+/// `Set-Cookie` it is handed, including those on intermediate redirect hops,
+/// which never appear on the final response's headers.
+struct Recorder {
+    inner: Arc<dyn wreq::cookie::CookieStore>,
+    seen: Mutex<Vec<String>>,
+}
+
+impl wreq::cookie::CookieStore for Recorder {
+    fn set_cookies(
+        &self,
+        headers: &mut dyn Iterator<Item = &wreq::header::HeaderValue>,
+        uri: &wreq::Uri,
+    ) {
+        let values: Vec<wreq::header::HeaderValue> = headers.cloned().collect();
+        self.seen.lock().unwrap().extend(
+            values
+                .iter()
+                .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned()),
+        );
+        self.inner.set_cookies(&mut values.iter(), uri);
+    }
+
+    fn cookies(&self, uri: &wreq::Uri, version: wreq::Version) -> wreq::cookie::Cookies {
+        self.inner.cookies(uri, version)
+    }
 }
 
 impl WreqBackend {
     pub fn new(config: NetConfig) -> Result<Self> {
-        let shared = Self::client(&config, true)?;
-        Ok(WreqBackend { shared, config })
-    }
-
-    fn client(config: &NetConfig, cookies: bool) -> Result<wreq::Client> {
+        let jar = Arc::new(wreq::cookie::Jar::default());
         let mut b = wreq::Client::builder()
             .emulation(wreq_util::Emulation::Chrome149)
-            .cookie_store(cookies)
+            .cookie_provider(jar.clone())
             // Follow redirects like the browser being impersonated (and like
             // cowbird's curl_cffi). Without this a backend moving hosts with a
             // 301 surfaced as a non-JSON body and quarantined a correct adapter.
@@ -211,7 +239,8 @@ impl WreqBackend {
         if let Some(p) = &config.proxy {
             b = b.proxy(wreq::Proxy::all(p.as_str()).map_err(|e| Error::down("transport", e))?);
         }
-        b.build().map_err(|e| Error::down("transport", e))
+        let shared = b.build().map_err(|e| Error::down("transport", e))?;
+        Ok(WreqBackend { shared, jar })
     }
 }
 
@@ -222,15 +251,19 @@ impl Backend for WreqBackend {
         req: HttpRequest,
         fresh: bool,
     ) -> std::result::Result<HttpResponse, String> {
-        // A throwaway client is one TLS handshake per request. Only the few
-        // backends that key inboxes on a session cookie pay for it.
-        let fresh_client;
-        let client = if fresh {
-            fresh_client = Self::client(&self.config, false).map_err(|e| e.to_string())?;
-            &fresh_client
-        } else {
-            &self.shared
-        };
+        // A fresh session is an empty jar, not a new client: connections and
+        // TLS sessions are still pooled, but no cookie from another inbox (or
+        // an earlier request) rides along. Cookies set on this request's own
+        // redirect hops are still sent on the next hop, as a browser would.
+        let recorder = Arc::new(Recorder {
+            inner: if fresh {
+                Arc::new(wreq::cookie::Jar::default())
+            } else {
+                self.jar.clone()
+            },
+            seen: Mutex::new(Vec::new()),
+        });
+        let client = &self.shared;
         let method = match req.method {
             Method::Get => wreq::Method::GET,
             Method::Post => wreq::Method::POST,
@@ -238,7 +271,9 @@ impl Backend for WreqBackend {
             Method::Patch => wreq::Method::PATCH,
             Method::Delete => wreq::Method::DELETE,
         };
-        let mut rb = client.request(method, req.full_url());
+        let mut rb = client
+            .request(method, req.full_url())
+            .cookie_provider(recorder.clone());
         if !req.follow_redirects {
             rb = rb.redirect(wreq::redirect::Policy::none());
         }
@@ -264,9 +299,10 @@ impl Backend for WreqBackend {
         };
         let resp = rb.send().await.map_err(|e| e.to_string())?;
         let status = resp.status().as_u16();
-        let headers = resp
+        let mut headers: Vec<(String, String)> = resp
             .headers()
             .iter()
+            .filter(|(k, _)| *k != wreq::header::SET_COOKIE)
             .map(|(k, v)| {
                 (
                     k.as_str().to_string(),
@@ -274,6 +310,13 @@ impl Backend for WreqBackend {
                 )
             })
             .collect();
+        // Every Set-Cookie on the chain, hop by hop, in order: a cookie set on
+        // a 302 is as much this request's answer as one on the final page.
+        headers.extend(
+            std::mem::take(&mut *recorder.seen.lock().unwrap())
+                .into_iter()
+                .map(|v| ("set-cookie".to_string(), v)),
+        );
         let text = resp.text().await.map_err(|e| e.to_string())?;
         Ok(HttpResponse {
             status,
@@ -793,5 +836,101 @@ mod tests {
             j.await.unwrap();
         }
         assert_eq!(wire.1.load(Ordering::SeqCst), 2);
+    }
+}
+
+/// The real wire (not fixtures) against a loopback HTTP/1.1 server: cookie
+/// handling lives in wreq's client layer, so only this can catch a regression.
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Serves forever: `/hop` 302s to `/land` setting `hop=1`; `/land` sets
+    /// `final=2` and a second `hop=3`; `/set` sets `shared=1`; `/echo`
+    /// answers with the Cookie header it received.
+    async fn server() -> String {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = l.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let cookie = req
+                        .lines()
+                        .find_map(|l| l.strip_prefix("cookie: ").or(l.strip_prefix("Cookie: ")))
+                        .unwrap_or("")
+                        .to_string();
+                    let (head, body) = match path.as_str() {
+                        "/hop" => (
+                            "302 Found\r\nLocation: /land\r\nSet-Cookie: hop=1; Path=/".to_string(),
+                            String::new(),
+                        ),
+                        "/land" => (
+                            "200 OK\r\nSet-Cookie: final=2; Path=/\r\nSet-Cookie: hop=3; Path=/"
+                                .to_string(),
+                            cookie,
+                        ),
+                        "/set" => (
+                            "200 OK\r\nSet-Cookie: shared=1; Path=/".to_string(),
+                            String::new(),
+                        ),
+                        _ => ("200 OK".to_string(), cookie),
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {head}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = s.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn get(url: String) -> HttpRequest {
+        HttpRequest {
+            method: Method::Get,
+            url,
+            query: Vec::new(),
+            headers: Vec::new(),
+            cookies: Vec::new(),
+            body: Body::Empty,
+            follow_redirects: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn cookies_set_on_redirect_hops_are_visible_and_sent_on() {
+        let base = server().await;
+        let b = WreqBackend::new(NetConfig::default()).unwrap();
+        for fresh in [true, false] {
+            let r = b.send(get(format!("{base}/hop")), fresh).await.unwrap();
+            assert_eq!(r.status, 200);
+            assert!(
+                r.text.contains("hop=1"),
+                "hop cookie sent on to /land (fresh={fresh}): {:?}",
+                r.text
+            );
+            assert_eq!(r.cookie("final").as_deref(), Some("2"));
+            assert_eq!(r.cookie("hop").as_deref(), Some("3"), "the later hop wins");
+            assert_eq!(r.cookies().iter().filter(|(k, _)| k == "hop").count(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_sessions_never_carry_the_shared_jar() {
+        let base = server().await;
+        let b = WreqBackend::new(NetConfig::default()).unwrap();
+        let r = b.send(get(format!("{base}/set")), false).await.unwrap();
+        assert_eq!(r.cookie("shared").as_deref(), Some("1"));
+        let shared = b.send(get(format!("{base}/echo")), false).await.unwrap();
+        assert!(shared.text.contains("shared=1"), "{:?}", shared.text);
+        let fresh = b.send(get(format!("{base}/echo")), true).await.unwrap();
+        assert!(!fresh.text.contains("shared"), "{:?}", fresh.text);
     }
 }

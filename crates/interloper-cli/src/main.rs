@@ -1100,6 +1100,9 @@ mod tests {
         for v in docs::ENV_VARS {
             assert!(text.contains(v.name));
         }
+        for (v, _) in interloper_server::config::ENV {
+            assert!(text.contains(v), "guide misses server setting {v}");
+        }
         let json = docs::guide_json(&cmd);
         assert_eq!(
             json["commands"].as_array().unwrap().len(),

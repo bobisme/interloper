@@ -220,10 +220,6 @@ pub const ENV_VARS: &[EnvVar] = &[
         name: "INTERLOPER_LOG",
         meaning: "Tracing filter for stderr logs, e.g. interloper=debug.",
     },
-    EnvVar {
-        name: "INTERLOPER_BIND, INTERLOPER_API_KEYS, ...",
-        meaning: "Server settings for `serve`; see the server docs.",
-    },
 ];
 
 fn subcommands(cmd: &Command) -> impl Iterator<Item = &Command> {
@@ -364,6 +360,10 @@ pub fn guide_text(root: &Command) -> String {
     for e in ENV_VARS {
         let _ = writeln!(s, "  {}\n      {}", e.name, e.meaning);
     }
+    s.push_str("\nSERVER ENVIRONMENT (`interloper serve`)\n");
+    for (name, meaning) in interloper_server::config::ENV {
+        let _ = writeln!(s, "  {name}\n      {meaning}");
+    }
     let kinds: Vec<&str> = Kind::ALL.iter().map(|k| k.as_str()).collect();
     let _ = writeln!(s, "\nKINDS (--kind)\n  {}", kinds.join(", "));
     s.push_str("\nPROVIDERS (built in; live health: `interloper providers`)\n");
@@ -424,6 +424,7 @@ pub fn guide_json(root: &Command) -> Value {
         "exit_codes": EXIT_CODES.iter().map(|e| json!({"code": e.code, "name": e.name, "meaning": e.meaning})).collect::<Vec<_>>(),
         "error_codes": ERROR_CODES.iter().map(|c| json!({"code": c.code, "exit": c.exit, "retry": c.retry.as_str(), "meaning": c.meaning})).collect::<Vec<_>>(),
         "env": ENV_VARS.iter().map(|e| json!({"name": e.name, "meaning": e.meaning})).collect::<Vec<_>>(),
+        "server_env": interloper_server::config::ENV.iter().map(|(n, m)| json!({"name": n, "meaning": m})).collect::<Vec<_>>(),
         "kinds": Kind::ALL.iter().map(|k| k.as_str()).collect::<Vec<_>>(),
         "providers": sorted_specs().iter().map(|s| json!({
             "name": s.name,

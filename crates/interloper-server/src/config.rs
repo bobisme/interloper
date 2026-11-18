@@ -63,6 +63,63 @@ impl Default for Config {
     }
 }
 
+/// Every setting `serve` reads, for `interloper guide` and the README. A test
+/// fails if `from_env` reads an `INTERLOPER_*` name missing from this table.
+pub const ENV: &[(&str, &str)] = &[
+    (
+        "INTERLOPER_API_KEYS",
+        "Comma-separated API keys; required (the server refuses to start open).",
+    ),
+    (
+        "INTERLOPER_BIND",
+        "Listen address (default 127.0.0.1:8080). PORT, if set instead, binds 0.0.0.0:PORT.",
+    ),
+    (
+        "INTERLOPER_ALLOWED_ORIGINS",
+        "Comma-separated CORS origins; unset sends no CORS headers.",
+    ),
+    (
+        "INTERLOPER_RATE_LIMIT",
+        "Requests per window per client, e.g. 30/60s (default).",
+    ),
+    (
+        "INTERLOPER_WAIT_DEFAULT",
+        "Seconds `wait` holds when the caller gives no timeout (default 25).",
+    ),
+    (
+        "INTERLOPER_WAIT_MAX",
+        "Ceiling in seconds on any `wait` (default 25).",
+    ),
+    (
+        "INTERLOPER_WEBHOOK_MAX",
+        "Ceiling in seconds a webhook waits for mail (default 600).",
+    ),
+    (
+        "INTERLOPER_WEBHOOK_SECRET",
+        "HMAC-SHA256 key; deliveries carry x-interloper-signature: sha256=...",
+    ),
+    (
+        "INTERLOPER_WEBHOOK_ALLOW_PRIVATE",
+        "1/true allows webhooks to private/loopback hosts (testing only).",
+    ),
+    (
+        "INTERLOPER_DATABASE",
+        "SQLite file for issued addresses; unset keeps them in memory.",
+    ),
+    (
+        "INTERLOPER_DATABASE_URL",
+        "Postgres URL: shared address store plus fleet health sync. Excludes INTERLOPER_DATABASE.",
+    ),
+    (
+        "INTERLOPER_INSTANCE_ID",
+        "This instance's name in fleet health rows (default $HOSTNAME).",
+    ),
+    (
+        "INTERLOPER_HEALTH_SYNC_SECONDS",
+        "Fleet health sync interval (default 5).",
+    ),
+];
+
 fn env(names: &[&str]) -> Option<String> {
     names
         .iter()
@@ -205,5 +262,19 @@ mod tests {
         assert_eq!(c.clamp_wait(None), c.wait_default);
         assert_eq!(c.clamp_webhook(Some(300)), Duration::from_secs(300));
         assert_eq!(c.clamp_webhook(None), c.webhook_max);
+    }
+
+    #[test]
+    fn every_setting_read_is_documented() {
+        let src = include_str!("config.rs");
+        let documented: Vec<&str> = ENV.iter().map(|(n, _)| *n).collect();
+        let re = interloper::regex::Regex::new(r#""(INTERLOPER_[A-Z_]+)""#).unwrap();
+        for c in re.captures_iter(src) {
+            let name = &c[1];
+            assert!(
+                documented.contains(&name),
+                "{name} is read but not in config::ENV"
+            );
+        }
     }
 }
