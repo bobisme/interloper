@@ -16,13 +16,12 @@
 //! 100 days without activity. Reading needs no solve.
 //!
 //! Every row, in the listing and on its own, carries the raw RFC 822 source in
-//! `raw`, parsed here with `mail-parser`. `x-lang: en` pins the worker's error
+//! `raw`, read with [`crate::mime::parse`]. `x-lang: en` pins the worker's error
 //! text to English, so a refused token is recognizable by its message.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mail_parser::{MessageParser, PartKind};
 use rand::seq::IndexedRandom;
 use serde_json::{Map, Value, json};
 
@@ -183,55 +182,20 @@ impl CfTempMail {
             ));
         };
         let source = row.get("source").and_then(Value::as_str).unwrap_or("");
-        let parsed = MessageParser::default().parse(raw);
-        let from = parsed
-            .as_ref()
-            .and_then(|m| m.from())
-            .and_then(|f| f.first())
-            .and_then(|mb| {
-                let addr = mb.address()?;
-                Some(match mb.name() {
-                    Some(n) if !n.is_empty() => format!("{n} <{addr}>"),
-                    _ => addr.to_string(),
-                })
-            });
-        let subject = parsed
-            .as_ref()
-            .and_then(|m| m.subject())
-            .unwrap_or("")
-            .to_string();
-        // Only a part of the asked-for type counts: mail-parser would convert
-        // the other one, and an empty body falls back below.
-        let body = |html: bool| -> String {
-            let Some(m) = parsed.as_ref() else {
-                return String::new();
-            };
-            let first = if html {
-                m.html_body().next()
-            } else {
-                m.text_body().next()
-            };
-            first
-                .filter(|p| match p.kind() {
-                    PartKind::Html => html,
-                    PartKind::Text => !html,
-                    _ => false,
-                })
-                .and_then(|p| p.text())
-                .map(|t| t.into_owned())
-                .unwrap_or_default()
-        };
-        let html = body(true);
-        let text = body(false);
+        let mail = crate::mime::parse(raw);
         Ok(Mail {
             id: id.to_string(),
-            sender: from.unwrap_or_else(|| source.to_string()),
-            subject,
+            sender: if mail.sender.is_empty() {
+                source.to_string()
+            } else {
+                mail.sender
+            },
+            subject: mail.subject,
             // created_at is SQLite's CURRENT_TIMESTAMP: "YYYY-MM-DD HH:MM:SS"
             // in UTC.
             received_at: row.get("created_at").and_then(parse_value_time),
-            html,
-            text,
+            html: mail.html.unwrap_or_default(),
+            text: mail.text.unwrap_or_default(),
         })
     }
 }
@@ -707,6 +671,22 @@ mod tests {
             Some("Bearer JWT-PLACEHOLDER")
         );
         assert!(s.seen().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_iso_2022_jp_message_decodes_exactly() {
+        // Without mail-parser's full_encoding this became U+FFFD.
+        let mut row = load("mail.json");
+        row["raw"] = json!(
+            "From: a@b.test\r\nSubject: =?ISO-2022-JP?B?GyRCRnxLXDhsGyhC?=\r\n\
+             Content-Type: text/plain; charset=ISO-2022-JP\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\nGyRCRnxLXDhsGyhC\r\n"
+        );
+        let w = wire().route(MAIL, Reply::json(row));
+        let m = build(&w).get(&address(), MID).await.unwrap();
+        assert_eq!(m.sender, "a@b.test");
+        assert_eq!(m.subject, "日本語");
+        assert_eq!(m.text.trim(), "日本語");
     }
 
     #[tokio::test]

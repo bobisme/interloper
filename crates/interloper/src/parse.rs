@@ -29,6 +29,20 @@ const BLOCK_TAGS: &[&str] = &[
     "td",
 ];
 
+/// Decode HTML character references (`&lt;`, `&quot;`, `&mdash;`, `&#39;`,
+/// ...) as Python's `html.unescape` does, leaving tags alone. Uses html5ever's
+/// decoder: the text is parsed as the RCDATA body of a `<textarea>`, where
+/// references are decoded and tags are not.
+pub fn unescape(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    // RCDATA ends only at `</textarea`; a stray one would truncate the text.
+    let safe = s.replace("</textarea", "&lt;/textarea");
+    let doc = Html::parse_fragment(&format!("<textarea>{safe}</textarea>"));
+    doc.root_element().text().collect()
+}
+
 /// Visible text of an HTML document. Block elements become line breaks so a
 /// code in its own `<td>` is not glued to the words around it, which is what
 /// both a human and the OTP scorer need.
@@ -313,6 +327,19 @@ fn keyword_score(hay: &str, start: usize, end: usize) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unescape_decodes_references_and_keeps_tags() {
+        assert_eq!(
+            unescape("a&lt;b&gt; &amp;mdash; &#39;x&#x27; &ldquo;hi&rdquo;"),
+            "a<b> &mdash; 'x' \u{201c}hi\u{201d}"
+        );
+        assert_eq!(
+            unescape("<b>bold</b> &amp; </textarea> x"),
+            "<b>bold</b> & </textarea> x"
+        );
+        assert_eq!(unescape("plain"), "plain");
+    }
 
     fn otp(text: &str) -> Option<String> {
         extract_otp("", text, None)

@@ -13,8 +13,10 @@
 
 pub mod contract;
 pub mod error;
+pub mod hash;
 pub mod health;
 pub mod inbox;
+pub mod mime;
 pub mod model;
 pub mod parse;
 pub mod pool;

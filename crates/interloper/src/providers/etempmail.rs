@@ -79,18 +79,17 @@ fn at(value: &str) -> Option<Timestamp> {
         .ok()
 }
 
-/// A stable id for a row: 64-bit FNV-1a over its fields as a JSON array,
-/// as 16 hex digits. Any stable hash would do; this one needs no dependency
-/// and never changes between builds, unlike std's `DefaultHasher`.
+/// A row's id, as cowbird derived it: the first 16 hex digits of SHA-1 over
+/// Python's `json.dumps([subject, from, date, body], ensure_ascii=False)`.
+/// serde_json escapes a string exactly as that does; only the separator
+/// differs (`", "`, not `","`), so the array is joined by hand.
 fn row_id(r: &Value) -> String {
-    let fields: Vec<&Value> = ROW_FIELDS.iter().map(|k| &r[*k]).collect();
-    let raw = serde_json::to_string(&fields).expect("serializes");
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in raw.bytes() {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{h:016x}")
+    let fields: Vec<String> = ROW_FIELDS
+        .iter()
+        .map(|k| serde_json::to_string(&r[*k]).expect("serializes"))
+        .collect();
+    let raw = format!("[{}]", fields.join(", "));
+    crate::hash::sha1_hex(raw.as_bytes(), 16)
 }
 
 fn s(r: &Value, k: &str) -> String {
@@ -393,6 +392,20 @@ mod tests {
             rows[0].received_at,
             Some("2026-09-25T03:15:19Z".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn ids_match_cowbird_byte_for_byte() {
+        // Expected values from cowbird's `_id` (sha1 of json.dumps with
+        // ensure_ascii=False, first 16 hex digits), run in Python.
+        assert_eq!(row_id(&load("inbox.json")[0]), "9d53407fb64a7169");
+        let tricky = json!({
+            "subject": "Привет \"q\" \\ 日本\u{2028}",
+            "from": "a\u{1}b\u{7f}",
+            "date": "25/09/2026 06:15:19",
+            "body": "x\r\n\t\u{8}\u{c}</p>",
+        });
+        assert_eq!(row_id(&tricky), "aadd4920e0a2b8e4");
     }
 
     #[tokio::test]

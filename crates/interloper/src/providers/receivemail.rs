@@ -29,6 +29,7 @@ use regex::Regex;
 use super::util::{local_or_random, pick_domain};
 use crate::error::{Error, Result};
 use crate::model::{Address, Capabilities, Kind, Message, MessageRow, days};
+use crate::parse::unescape;
 use crate::provider::{GenerateOptions, Provider};
 use crate::registry::ProviderSpec;
 use crate::transport::Transport;
@@ -72,20 +73,6 @@ pub const SPEC: ProviderSpec = ProviderSpec {
 
 pub struct ReceiveMail {
     http: Transport,
-}
-
-/// Decode HTML character references (`&lt;`, `&quot;`, `&mdash;`, ...), as
-/// Python's `html.unescape` does. Core has no entity decoder, so this borrows
-/// html5ever's: a `<textarea>` body is RCDATA, where references are decoded
-/// and tags are not.
-pub(crate) fn unescape(s: &str) -> String {
-    if !s.contains('&') {
-        return s.to_string();
-    }
-    // RCDATA ends only at `</textarea`; a stray one would truncate the text.
-    let safe = s.replace("</textarea", "&lt;/textarea");
-    let doc = scraper::Html::parse_fragment(&format!("<textarea>{safe}</textarea>"));
-    doc.root_element().text().collect()
 }
 
 /// The page's `25-09-2026 03:31:59 am`, which is UTC.
@@ -589,15 +576,5 @@ mod tests {
         let m = build(&w).get(&own(), MESSAGE_ID).await.unwrap();
         assert!(m.text.contains("Your code is 482913."), "{}", m.text);
         assert!(!m.text.contains("Delete"), "{}", m.text);
-    }
-
-    #[test]
-    fn unescape_decodes_named_and_numeric_references() {
-        assert_eq!(
-            unescape("a&lt;b&gt; &amp;mdash; &#39;x&#x27;"),
-            "a<b> &mdash; 'x'"
-        );
-        assert_eq!(unescape("&ldquo;hi&rdquo;"), "\u{201c}hi\u{201d}");
-        assert_eq!(unescape("plain"), "plain");
     }
 }

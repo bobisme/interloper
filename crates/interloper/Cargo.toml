@@ -12,11 +12,15 @@ base64.workspace = true
 ego-tree = "0.11"
 futures.workspace = true
 jiff.workspace = true
+mail-parser.workspace = true
+md-5.workspace = true
 rand.workspace = true
 regex.workspace = true
 scraper.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -24,7 +28,6 @@ url.workspace = true
 urlencoding.workspace = true
 wreq.workspace = true
 wreq-util.workspace = true
-mail-parser = { version = "1.0.1", default-features = false }
 
 [features]
 # Tests that reach real backends. Off by default: `cargo test --features live`.

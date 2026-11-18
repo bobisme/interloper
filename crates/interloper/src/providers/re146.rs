@@ -6,9 +6,6 @@
 //!
 //! The domains churn (several are throwaway registrations), so they are
 //! fetched, never hardcoded.
-//!
-//! Core has neither an MD5 nor a MIME parser, so both live at the bottom of
-//! this file, cut down to what this backend serves.
 
 use std::sync::Arc;
 
@@ -16,6 +13,7 @@ use async_trait::async_trait;
 
 use super::util::{local_or_random, pick_domain};
 use crate::error::{Error, Result};
+use crate::hash::md5_hex;
 use crate::model::{Address, Capabilities, Kind, Message, MessageRow, days, hours};
 use crate::provider::{GenerateOptions, Provider};
 use crate::registry::ProviderSpec;
@@ -114,283 +112,15 @@ impl Provider for Re146 {
                 format!("storage answered HTTP {}", resp.status),
             ));
         }
-        let raw = &resp.text;
-        let (headers, _) = mime::split(raw);
-        let html = mime::body(raw, "html").unwrap_or_default();
-        let text = mime::body(raw, "plain");
-        let received = mime::header(&headers, "Date")
-            .and_then(|d| jiff::fmt::rfc2822::parse(d.trim()).ok())
-            .map(|z| z.timestamp());
+        let mail = crate::mime::parse(&resp.text);
         Ok(Message::from_bodies(
             id,
-            mime::header(&headers, "From")
-                .map(mime::decode_words)
-                .unwrap_or_default(),
-            mime::header(&headers, "Subject")
-                .map(mime::decode_words)
-                .unwrap_or_default(),
-            received,
-            html,
-            text,
+            mail.sender,
+            mail.subject,
+            mail.date,
+            mail.html.unwrap_or_default(),
+            mail.text,
         ))
-    }
-}
-
-/// RFC 1321. Only ever fed an address, so speed is beside the point.
-fn md5_hex(input: &[u8]) -> String {
-    const S: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
-        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
-        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
-    ];
-    let k: Vec<u32> = (0..64)
-        .map(|i| ((i as f64 + 1.0).sin().abs() * 4_294_967_296.0) as u32)
-        .collect();
-    let mut st: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
-    let mut msg = input.to_vec();
-    let bits = (input.len() as u64).wrapping_mul(8);
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend(bits.to_le_bytes());
-    for chunk in msg.chunks(64) {
-        let m: Vec<u32> = chunk
-            .chunks(4)
-            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-            .collect();
-        let [mut a, mut b, mut c, mut d] = st;
-        for i in 0..64 {
-            let (f, g) = match i / 16 {
-                0 => ((b & c) | (!b & d), i),
-                1 => ((d & b) | (!d & c), (5 * i + 1) % 16),
-                2 => (b ^ c ^ d, (3 * i + 5) % 16),
-                _ => (c ^ (b | !d), (7 * i) % 16),
-            };
-            let f = f.wrapping_add(a).wrapping_add(k[i]).wrapping_add(m[g]);
-            a = d;
-            d = c;
-            c = b;
-            b = b.wrapping_add(f.rotate_left(S[i]));
-        }
-        for (s, v) in st.iter_mut().zip([a, b, c, d]) {
-            *s = s.wrapping_add(v);
-        }
-    }
-    st.iter()
-        .flat_map(|w| w.to_le_bytes())
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-/// Just enough RFC 2045/2047 to pull the text and HTML bodies out of a
-/// message: nested multipart, base64 and quoted-printable, and encoded-word
-/// headers.
-mod mime {
-    use std::sync::LazyLock;
-
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD;
-    use regex::Regex;
-
-    pub type Headers = Vec<(String, String)>;
-
-    /// Headers (unfolded) and the body after the first blank line.
-    pub fn split(raw: &str) -> (Headers, &str) {
-        let (head, body) = match raw.find("\r\n\r\n") {
-            Some(i) if raw.find("\n\n").is_none_or(|j| i < j) => (&raw[..i], &raw[i + 4..]),
-            _ => match raw.find("\n\n") {
-                Some(j) => (&raw[..j], &raw[j + 2..]),
-                None => (raw, ""),
-            },
-        };
-        let mut headers: Headers = Vec::new();
-        for line in head.lines() {
-            if line.starts_with([' ', '\t']) {
-                if let Some((_, v)) = headers.last_mut() {
-                    v.push(' ');
-                    v.push_str(line.trim());
-                }
-            } else if let Some((k, v)) = line.split_once(':') {
-                headers.push((k.trim().to_string(), v.trim().to_string()));
-            }
-        }
-        (headers, body)
-    }
-
-    pub fn header<'a>(h: &'a Headers, name: &str) -> Option<&'a str> {
-        h.iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
-    }
-
-    /// `type/subtype` (lowercased) and one parameter of a header value.
-    fn param(value: &str, name: &str) -> Option<String> {
-        value.split(';').skip(1).find_map(|p| {
-            let (k, v) = p.split_once('=')?;
-            k.trim()
-                .eq_ignore_ascii_case(name)
-                .then(|| v.trim().trim_matches('"').to_string())
-        })
-    }
-
-    fn mime_type(value: &str) -> String {
-        value
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-    }
-
-    /// The first `text/<subtype>` body that is not an attachment, decoded.
-    pub fn body(raw: &str, subtype: &str) -> Option<String> {
-        let (h, body) = split(raw);
-        let ctype = header(&h, "Content-Type").unwrap_or("text/plain");
-        let kind = mime_type(ctype);
-        if kind.starts_with("multipart/") {
-            let boundary = param(ctype, "boundary")?;
-            let delim = format!("--{boundary}");
-            let mut parts = body.split(delim.as_str()).skip(1);
-            return parts.find_map(|p| {
-                if p.starts_with("--") {
-                    return None;
-                }
-                let p = p
-                    .strip_prefix("\r\n")
-                    .or_else(|| p.strip_prefix('\n'))
-                    .unwrap_or(p);
-                body_of_part(p, subtype)
-            });
-        }
-        if header(&h, "Content-Disposition").is_some_and(|d| mime_type(d) == "attachment") {
-            return None;
-        }
-        if kind != format!("text/{subtype}") {
-            return None;
-        }
-        let cte = header(&h, "Content-Transfer-Encoding")
-            .unwrap_or("7bit")
-            .trim()
-            .to_ascii_lowercase();
-        let bytes = match cte.as_str() {
-            "base64" => {
-                let clean: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-                STANDARD
-                    .decode(clean)
-                    .unwrap_or_else(|_| body.as_bytes().to_vec())
-            }
-            "quoted-printable" => quoted_printable(body, false),
-            _ => body.as_bytes().to_vec(),
-        };
-        Some(decode_charset(&bytes, param(ctype, "charset").as_deref()))
-    }
-
-    fn body_of_part(p: &str, subtype: &str) -> Option<String> {
-        // Trailing CRLF before the next delimiter belongs to the delimiter.
-        let p = p
-            .strip_suffix("\r\n")
-            .or_else(|| p.strip_suffix('\n'))
-            .unwrap_or(p);
-        body(p, subtype)
-    }
-
-    /// UTF-8 and the Latin-1 family decode exactly. Anything else decodes as
-    /// lossy UTF-8: cowbird raised drift for a charset Python lacked, but one
-    /// odd message must not quarantine the provider, and this list is far
-    /// shorter than Python's.
-    fn decode_charset(bytes: &[u8], charset: Option<&str>) -> String {
-        let cs = charset.unwrap_or("us-ascii").to_ascii_lowercase();
-        match cs.as_str() {
-            "iso-8859-1" | "latin1" | "latin-1" | "windows-1252" | "cp1252" => {
-                bytes.iter().map(|&b| b as char).collect()
-            }
-            _ => String::from_utf8_lossy(bytes).into_owned(),
-        }
-    }
-
-    fn quoted_printable(s: &str, underscores: bool) -> Vec<u8> {
-        let b = s.as_bytes();
-        let mut out = Vec::with_capacity(b.len());
-        let mut i = 0;
-        while i < b.len() {
-            match b[i] {
-                b'=' if b.get(i + 1) == Some(&b'\r') && b.get(i + 2) == Some(&b'\n') => i += 3,
-                b'=' if b.get(i + 1) == Some(&b'\n') => i += 2,
-                b'=' if i + 2 < b.len() => {
-                    let hex = |c: u8| (c as char).to_digit(16);
-                    match (hex(b[i + 1]), hex(b[i + 2])) {
-                        (Some(hi), Some(lo)) => {
-                            out.push((hi * 16 + lo) as u8);
-                            i += 3;
-                        }
-                        _ => {
-                            out.push(b'=');
-                            i += 1;
-                        }
-                    }
-                }
-                b'_' if underscores => {
-                    out.push(b' ');
-                    i += 1;
-                }
-                c => {
-                    out.push(c);
-                    i += 1;
-                }
-            }
-        }
-        out
-    }
-
-    static WORD: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"=\?([^?]+)\?([bBqQ])\?([^?]*)\?=").unwrap());
-    static BETWEEN_WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\?=)\s+(=\?)").unwrap());
-
-    /// RFC 2047 encoded words in a header value. Whitespace between two
-    /// adjacent encoded words is not part of the text.
-    pub fn decode_words(value: &str) -> String {
-        let joined = BETWEEN_WORDS.replace_all(value, "$1$2");
-        WORD.replace_all(&joined, |c: &regex::Captures<'_>| {
-            let bytes = if c[2].eq_ignore_ascii_case("b") {
-                STANDARD.decode(&c[3]).unwrap_or_default()
-            } else {
-                quoted_printable(&c[3], true)
-            };
-            decode_charset(&bytes, Some(&c[1]))
-        })
-        .into_owned()
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn quoted_printable_and_soft_breaks() {
-            let raw = "Content-Type: text/plain; charset=utf-8\n\
-                       Content-Transfer-Encoding: quoted-printable\n\n\
-                       caf=C3=A9 code=3D1 lo=\nng";
-            assert_eq!(body(raw, "plain").unwrap(), "café code=1 long");
-        }
-
-        #[test]
-        fn base64_part_inside_nested_multipart() {
-            let raw = "Content-Type: multipart/mixed; boundary=\"o\"\n\n--o\n\
-                       Content-Type: multipart/alternative; boundary=i\n\n--i\n\
-                       Content-Type: text/html\nContent-Transfer-Encoding: base64\n\n\
-                       PHA+aGk8L3A+\n--i--\n--o--\n";
-            assert_eq!(body(raw, "html").unwrap(), "<p>hi</p>");
-            assert_eq!(body(raw, "plain"), None);
-        }
-
-        #[test]
-        fn encoded_words() {
-            assert_eq!(
-                decode_words("=?UTF-8?B?Q29kZTo=?= =?utf-8?Q?_caf=C3=A9?= now"),
-                "Code: café now"
-            );
-        }
     }
 }
 
@@ -424,18 +154,6 @@ mod tests {
 
     fn address() -> Address {
         Address::new("cbbe51e1e579@zenvixsmp.xyz", "re146")
-    }
-
-    #[test]
-    fn md5_matches_the_rfc_vectors() {
-        assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
-        assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
-        assert_eq!(
-            md5_hex(
-                b"12345678901234567890123456789012345678901234567890123456789012345678901234567890"
-            ),
-            "57edf4a22be3c955ac49da2e2107b67a"
-        );
     }
 
     #[tokio::test]
@@ -504,14 +222,29 @@ mod tests {
 
     #[tokio::test]
     async fn a_body_in_an_unknown_charset_is_read_not_quarantined() {
-        // cowbird raised drift here (Python lacked the codec). Interloper knows
-        // far fewer codecs than Python, so it decodes lossily instead: one odd
-        // message must not quarantine the provider.
+        // cowbird raised drift here (Python lacked the codec). Interloper
+        // decodes lossily instead: one odd message must not quarantine the
+        // provider.
         let source = "From: a@b.test\nSubject: x\n\
                       Content-Type: text/html; charset=x-no-such-charset\n\n<p>hi</p>\n";
         let w = wire().route("/storage/", Reply::text(source));
         let m = build(&w).get(&address(), MESSAGE_ID).await.unwrap();
         assert_eq!(m.text.trim(), "hi");
+    }
+
+    #[tokio::test]
+    async fn non_utf8_charsets_decode_exactly() {
+        // "Привет" as windows-1251 base64 and a KOI8-R encoded word; these
+        // degraded to U+FFFD before core read mail with full charset support.
+        let source = "From: =?KOI8-R?B?8NLJ18XU?= <a@b.test>\n\
+                      Subject: =?ISO-2022-JP?B?GyRCRnxLXDhsGyhC?=\n\
+                      Content-Type: text/plain; charset=windows-1251\n\
+                      Content-Transfer-Encoding: base64\n\nz/Do4uXy\n";
+        let w = wire().route("/storage/", Reply::text(source));
+        let m = build(&w).get(&address(), MESSAGE_ID).await.unwrap();
+        assert_eq!(m.sender, "Привет <a@b.test>");
+        assert_eq!(m.subject, "日本語");
+        assert_eq!(m.text.trim(), "Привет");
     }
 
     #[tokio::test]

@@ -9,22 +9,22 @@
 //! From/To/Subject/Date block, then the mail's raw body with every newline
 //! swapped for `<br/>`. The mail's own headers are gone, so a multipart body
 //! arrives as bare boundary lines. Items have no id, so one is derived from
-//! the date, sender and subject.
+//! the date, sender and subject, as cowbird derived it.
 //!
-//! Core has no RSS or MIME reader, so this module carries a minimal one of
-//! each: just enough for the feed's fixed item shape and for a multipart body
-//! whose top-level headers were stripped.
+//! Core has no RSS reader, so this module carries a minimal one for the
+//! feed's fixed item shape. A multipart body gets its stripped top-level
+//! header back and goes to [`crate::mime::parse`].
 
 use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
-use base64::Engine;
 use rand::Rng;
 use regex::Regex;
 
 use super::util::pick_domain;
 use crate::error::{Error, Result, clip};
 use crate::model::{Address, Capabilities, Kind, Message, MessageRow, hours};
+use crate::parse::unescape;
 use crate::provider::{GenerateOptions, Provider};
 use crate::registry::ProviderSpec;
 use crate::transport::Transport;
@@ -35,15 +35,6 @@ const DOMAIN: &str = "eyepaste.com";
 static HTML: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)<(html|body|div|p|table|a|br)\b").unwrap());
 static ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<item>(.*?)</item>").unwrap());
-static CHARSET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)^(utf-?8|utf-?16(be|le)?|utf-?7|us-ascii|ascii|iso[-_]?8859-\d+|latin-?\d|windows-125\d|cp125\d|koi8-[ru]|gb2312|gbk|gb18030|big5|shift[-_]jis|sjis|euc-jp|euc-kr|iso-2022-jp)$",
-    )
-    .unwrap()
-});
-
-static LATIN1: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(iso[-_]?8859-1|latin-?1|windows-1252|cp1252)$").unwrap());
 
 pub const CAPS: Capabilities = Capabilities {
     kind: &[Kind::OwnDomain],
@@ -86,15 +77,10 @@ fn repair(feed: String) -> String {
         .unwrap_or(feed)
 }
 
-/// FNV-1a: a stable id across processes and builds. cowbird used a SHA-256
-/// prefix; the ids only have to agree between one list() and the next get().
+/// cowbird's id: the first 16 hex digits of SHA-256 over date, sender and
+/// subject joined by newlines.
 fn digest(s: &str) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.bytes() {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    format!("{h:016x}")
+    crate::hash::sha256_hex(s.as_bytes(), 16)
 }
 
 fn at(value: &str) -> Option<jiff::Timestamp> {
@@ -102,28 +88,6 @@ fn at(value: &str) -> Option<jiff::Timestamp> {
         .map(|z| z.timestamp())
         .ok()
         .or_else(|| crate::shape::parse_time(value))
-}
-
-fn unescape(s: &str) -> String {
-    static ENTITY: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"&(lt|gt|amp|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);").unwrap());
-    ENTITY
-        .replace_all(s, |c: &regex::Captures<'_>| {
-            let e = &c[1];
-            let ch = match e {
-                "lt" => Some('<'),
-                "gt" => Some('>'),
-                "amp" => Some('&'),
-                "quot" => Some('"'),
-                "apos" => Some('\''),
-                _ if e.starts_with("#x") => u32::from_str_radix(&e[2..], 16)
-                    .ok()
-                    .and_then(char::from_u32),
-                _ => e[1..].parse().ok().and_then(char::from_u32),
-            };
-            ch.map_or_else(|| c[0].to_string(), String::from)
-        })
-        .into_owned()
 }
 
 /// The text of `<name>` in an item: CDATA verbatim, the rest unescaped.
@@ -151,13 +115,14 @@ fn item(node: &str) -> Item {
     let mut subject = String::new();
     let mut date = String::new();
     for line in head.replace("<p>", "").split("<br/>") {
-        if let Some((k, v)) = line.trim().split_once(": ") {
-            match k {
-                "From" => sender = v.trim().to_string(),
-                "Subject" => subject = v.trim().to_string(),
-                "Date" => date = v.trim().to_string(),
-                _ => {}
-            }
+        // Python's partition: a line without ": " is a key with no value.
+        let line = line.trim();
+        let (k, v) = line.split_once(": ").unwrap_or((line, ""));
+        match k {
+            "From" => sender = v.trim().to_string(),
+            "Subject" => subject = v.trim().to_string(),
+            "Date" => date = v.trim().to_string(),
+            _ => {}
         }
     }
     let rest = rest.trim();
@@ -180,194 +145,25 @@ fn item(node: &str) -> Item {
     }
 }
 
-/// One MIME entity: lowercased header names, unfolded values, and its body.
-struct Part<'a> {
-    headers: Vec<(String, String)>,
-    body: &'a str,
-}
-
-impl<'a> Part<'a> {
-    fn parse(raw: &'a str) -> Part<'a> {
-        let (head, body) = match raw.find("\n\n") {
-            Some(i) => (&raw[..i], &raw[i + 2..]),
-            None if raw.trim().is_empty() => ("", ""),
-            None => (raw, ""),
-        };
-        let mut headers: Vec<(String, String)> = vec![];
-        for line in head.lines() {
-            if line.starts_with([' ', '\t']) {
-                if let Some((_, v)) = headers.last_mut() {
-                    v.push(' ');
-                    v.push_str(line.trim());
-                }
-            } else if let Some((k, v)) = line.split_once(':') {
-                headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
-            }
-        }
-        Part { headers, body }
-    }
-
-    fn header(&self, name: &str) -> &str {
-        self.headers
-            .iter()
-            .find(|(k, _)| k == name)
-            .map_or("", |(_, v)| v.as_str())
-    }
-
-    /// `text/plain` when absent, as RFC 2045 says.
-    fn mime(&self) -> String {
-        let t = self.header("content-type");
-        let t = t
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase();
-        if t.is_empty() { "text/plain".into() } else { t }
-    }
-
-    fn param(&self, name: &str) -> Option<String> {
-        self.header("content-type")
-            .split(';')
-            .skip(1)
-            .find_map(|p| {
-                let (k, v) = p.split_once('=')?;
-                k.trim()
-                    .eq_ignore_ascii_case(name)
-                    .then(|| v.trim().trim_matches('"').to_string())
-            })
-    }
-
-    fn is_attachment(&self) -> bool {
-        self.header("content-disposition")
-            .trim_start()
-            .to_ascii_lowercase()
-            .starts_with("attachment")
-    }
-
-    fn content(&self) -> Result<String> {
-        let charset = self.param("charset").unwrap_or_else(|| "us-ascii".into());
-        if !CHARSET.is_match(&charset) {
-            return Err(Error::drift(
-                "eyepaste",
-                "a charset this adapter knows",
-                charset,
-            ));
-        }
-        let bytes = match self
-            .header("content-transfer-encoding")
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "base64" => {
-                let clean: String = self.body.chars().filter(|c| !c.is_whitespace()).collect();
-                base64::engine::general_purpose::STANDARD
-                    .decode(clean)
-                    .map_err(|e| Error::drift("eyepaste", "a base64 part", e.to_string()))?
-            }
-            "quoted-printable" => quoted_printable(self.body),
-            // Already text: the feed carried it as characters, not bytes.
-            _ => return Ok(self.body.to_string()),
-        };
-        Ok(if LATIN1.is_match(&charset) {
-            bytes.iter().map(|&b| char::from(b)).collect()
-        } else {
-            String::from_utf8_lossy(&bytes).into_owned()
-        })
-    }
-}
-
-fn quoted_printable(s: &str) -> Vec<u8> {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'=' {
-            if b.get(i + 1) == Some(&b'\n') {
-                i += 2;
-                continue;
-            }
-            if b.get(i + 1) == Some(&b'\r') && b.get(i + 2) == Some(&b'\n') {
-                i += 3;
-                continue;
-            }
-            if let Some(Ok(v)) = s.get(i + 1..i + 3).map(|h| u8::from_str_radix(h, 16)) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    out
-}
-
-/// The parts of a multipart body between `--boundary` lines.
-fn split_parts<'a>(body: &'a str, boundary: &str) -> Vec<&'a str> {
-    let open = format!("--{boundary}");
-    let close = format!("--{boundary}--");
-    let mut parts = vec![];
-    let mut start: Option<usize> = None;
-    let mut pos = 0;
-    for line in body.split_inclusive('\n') {
-        let t = line.trim_end();
-        if t == open || t == close {
-            if let Some(s) = start {
-                parts.push(body[s..pos].strip_suffix('\n').unwrap_or(&body[s..pos]));
-            }
-            if t == close {
-                return parts;
-            }
-            start = Some(pos + line.len());
-        }
-        pos += line.len();
-    }
-    if let Some(s) = start {
-        parts.push(&body[s..]);
-    }
-    parts
-}
-
-/// Depth-first, first non-attachment `text/<subtype>` wins: what Python's
-/// `get_body` picked for cowbird.
-fn find<'a>(part: &Part<'a>, subtype: &str) -> Option<Part<'a>> {
-    if part.is_attachment() {
-        return None;
-    }
-    let mime = part.mime();
-    if mime == format!("text/{subtype}") {
-        return Some(Part {
-            headers: part.headers.clone(),
-            body: part.body,
-        });
-    }
-    if !mime.starts_with("multipart/") {
-        return None;
-    }
-    let boundary = part.param("boundary")?;
-    split_parts(part.body, &boundary)
-        .into_iter()
-        .find_map(|p| find(&Part::parse(p), subtype))
-}
-
 /// (html, text) from a body whose own headers were stripped.
 fn split(body: &str) -> Result<(String, String)> {
     let first = body.split('\n').next().unwrap_or("").trim();
     if first.len() > 2
         && let Some(boundary) = first.strip_prefix("--")
     {
-        let top = Part {
-            headers: vec![(
-                "content-type".into(),
-                format!("multipart/mixed; boundary=\"{boundary}\""),
-            )],
-            body,
-        };
-        let html = find(&top, "html").map(|p| p.content()).transpose()?;
-        let text = find(&top, "plain").map(|p| p.content()).transpose()?;
-        let html = html.unwrap_or_default();
-        let text = text
+        let mail = crate::mime::parse(&format!(
+            "Content-Type: multipart/mixed; boundary=\"{boundary}\"\n\n{body}"
+        ));
+        if let Some(charset) = mail.unknown_charset {
+            return Err(Error::drift(
+                "eyepaste",
+                "a charset this adapter knows",
+                charset,
+            ));
+        }
+        let html = mail.html.unwrap_or_default();
+        let text = mail
+            .text
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| crate::parse::html_to_text(&html));
         return Ok((html, text));
@@ -385,7 +181,10 @@ impl Eyepaste {
                 .get(format!("{SITE}/inbox/{}.rss", a.value))
                 .text()
                 .await?,
-        );
+        )
+        // What an XML parser does to line ends, so ids match cowbird's.
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
         // RSS never needs a DTD, and a DTD is the only way entity expansion
         // reaches a parser. Refuse it outright. Only the prolog counts: a mail
         // body in CDATA may carry its own <!DOCTYPE html>.
@@ -546,6 +345,21 @@ Thu, 24 Sep 2026 22:58:55 +0700
         );
         assert_eq!(row.subject, "JoltMx test email (ref 01a0d69e20c2)");
         assert_eq!(row.received_at, ts("2026-09-25T03:31:22Z"));
+    }
+
+    #[tokio::test]
+    async fn ids_match_cowbird_byte_for_byte() {
+        // Expected values from cowbird's `_item` run on the same feeds.
+        assert_eq!(only(&build(&wire())).await.id, "8715ea1667857075");
+        assert_eq!(only(&with_feed(SINGLE_PART)).await.id, "f732b7f4d23ddf9b");
+    }
+
+    #[test]
+    fn non_utf8_parts_decode_exactly() {
+        // Previously a KOI8-R or ISO-2022-JP part decoded as lossy UTF-8.
+        // cowbird's `_split` gives the same pair for this body.
+        let body = "--b\nContent-Type: text/plain; charset=koi8-r\nContent-Transfer-Encoding: base64\n\n8NLJ18XU\n--b\nContent-Type: text/html; charset=iso-2022-jp\nContent-Transfer-Encoding: base64\n\nGyRCRnxLXDhsGyhC\n--b--";
+        assert_eq!(split(body).unwrap(), ("日本語".into(), "Привет".into()));
     }
 
     #[tokio::test]

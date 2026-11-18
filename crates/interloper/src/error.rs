@@ -170,7 +170,7 @@ impl Error {
     }
 }
 
-pub(crate) fn clip(s: &str, max: usize) -> String {
+pub fn clip(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
