@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # BoringSSL builds from source for wreq.
+      - run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      # Fixtures replace only the wire, so this exercises every adapter's
+      # parsing plus the real retry/health/routing logic, offline.
+      - run: cargo test --locked
+
+  postgres:
+    # Fleet-mode integration tests; skipped by the suite when the URL is unset.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: il
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      INTERLOPER_TEST_DATABASE_URL: postgres://postgres:il@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
+      - run: cargo test --locked -p interloper-server
+
+  canary:
+    # Live probe of every provider. Never blocks a merge: providers break on
+    # their own schedule, and quarantine (schema drift) is what needs a human.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev
+      - run: cargo run --release --locked -p interloper-cli -- canary

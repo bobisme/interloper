@@ -105,7 +105,15 @@ impl Config {
             Some(b) => b
                 .parse()
                 .map_err(|e| format!("INTERLOPER_BIND {b:?}: {e}"))?,
-            None => d.bind,
+            // Render, Koyeb and Fly inject PORT and route only to it, on every
+            // interface. An explicit INTERLOPER_BIND still wins.
+            None => match env(&["PORT"]) {
+                Some(p) => std::net::SocketAddr::from((
+                    [0, 0, 0, 0],
+                    p.trim().parse::<u16>().map_err(|e| format!("PORT {p:?}: {e}"))?,
+                )),
+                None => d.bind,
+            },
         };
         let rate_limit = match env(&["INTERLOPER_RATE_LIMIT", "RATE_LIMIT"]) {
             Some(r) => parse_rate(&r)?,
