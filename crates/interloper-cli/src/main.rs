@@ -43,6 +43,15 @@ enum Command {
     /// Inspect or clear recorded health.
     #[command(subcommand)]
     Health(HealthCmd),
+    /// Run the HTTP API (configured by INTERLOPER_* env; see the server docs).
+    Serve(ServeArgs),
+}
+
+#[derive(Args)]
+struct ServeArgs {
+    /// Address to listen on (overrides INTERLOPER_BIND).
+    #[arg(long)]
+    bind: Option<std::net::SocketAddr>,
 }
 
 #[derive(Args)]
@@ -449,7 +458,22 @@ fn cmd_health(il: &Interloper, cmd: HealthCmd) -> Result<(), Error> {
     Ok(())
 }
 
+async fn cmd_serve(a: ServeArgs) -> Result<ExitCode, Error> {
+    let mut config = interloper_server::config::Config::from_env().map_err(Error::unsupported)?;
+    if let Some(b) = a.bind {
+        config.bind = b;
+    }
+    let il = Interloper::from_env()?;
+    interloper_server::serve(config, il)
+        .await
+        .map_err(Error::unsupported)?;
+    Ok(ExitCode::SUCCESS)
+}
+
 async fn run(cli: Cli) -> Result<ExitCode, Error> {
+    if let Command::Serve(a) = cli.command {
+        return cmd_serve(a).await;
+    }
     let il = Arc::new(Interloper::from_env()?);
     let result = match cli.command {
         Command::New(a) => cmd_new(&il, a).await.map(|_| ExitCode::SUCCESS),
@@ -462,6 +486,7 @@ async fn run(cli: Cli) -> Result<ExitCode, Error> {
         }
         Command::Canary(a) => canary::run(&il, a.only, a.concurrency, a.json).await,
         Command::Health(h) => cmd_health(&il, h).map(|_| ExitCode::SUCCESS),
+        Command::Serve(_) => unreachable!("handled above"),
     };
     // A read-only or full disk must not fail the user's command.
     if let Err(e) = il.save_health() {
@@ -478,8 +503,9 @@ fn tracing_subscriber_warn(e: &std::io::Error) {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     let level = match cli.verbose {
+        0 if matches!(cli.command, Command::Serve(_)) => "interloper=info,interloper_server=info",
         0 => "warn",
-        1 => "interloper=debug",
+        1 => "interloper=debug,interloper_server=debug",
         _ => "debug",
     };
     let filter = tracing_subscriber::EnvFilter::try_from_env("INTERLOPER_LOG")

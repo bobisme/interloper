@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 interloper.workspace = true
+interloper-server = { path = "../interloper-server" }
 clap.workspace = true
 futures.workspace = true
 jiff.workspace = true
