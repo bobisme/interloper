@@ -18,29 +18,57 @@ $ interloper wait "$TOKEN" --link verify
 https://example.test/verify?t=…
 
 $ interloper providers
-PROVIDER        STATUS       P50      TTL      KIND        SITES
-guerrillamail   ok           1.3s     1h       own-domain  guerrillamail.com,…
-mailtm          ok           0.5s     forever  own-domain  mail.tm
+PROVIDER       STATUS  P50   TTL      KIND        SITES
+guerrillamail  ok      1.3s  1h       own-domain  guerrillamail.com,…
+mailtm         ok      0.5s  forever  own-domain  mail.tm
 ```
 
-`new` prints a **token** (`ilp1.…`): address, provider, expiry and the
-provider's credentials in one copy-pasteable value. `wait`, `watch` and `read`
-take it, so a second process resumes the inbox with one argument instead of
-cowbird's `ADDRESS --provider P --state S`. It holds credentials; treat it as
-a secret. A bare address works too for providers that need no state, and the
-provider is inferred from the domain.
+`new` prints a **token** (`ilp1.…`): a portable handle that carries the
+address, provider, expiry and the provider's session state in one
+copy-pasteable value. `wait`, `watch` and `read` take it as TARGET, so a second
+process resumes the inbox with one argument instead of cowbird's
+`ADDRESS --provider P --state S`. It holds credentials; treat it as a secret.
+TARGET `-` reads the token from stdin. A bare address works too for providers
+that need no state, and the provider is inferred from the domain.
 
 | command | |
 |---|---|
-| `new [-p P] [--kind K\|--gmail] [--local L] [--domain D] [--not-domain D]… [--min-ttl 2h] [-n N] [--json]` | acquire address(es) |
-| `wait TARGET [--otp [--pattern RE]\|--link [TEXT]] [--from S] [--subject S] [-t 120s] [--json]` | first matching mail |
-| `watch TARGET [--json]` | stream mail as it arrives |
-| `read TARGET [ID] [--json]` | list, or show one message |
-| `providers [--json]` | measured health matrix |
-| `canary [--json] [PROVIDER…]` | live probe, concurrent; exits 1 only on schema drift |
+| `new [-p P] [--kind K\|--gmail] [--local L] [--domain D] [--not-domain D]… [--min-ttl 2h] [-n N] [--print address\|token\|provider\|expires]` | acquire address(es) |
+| `wait TARGET [--otp [--pattern RE]\|--link [TEXT]] [--from S] [--subject S] [-t 120s]` | first matching mail |
+| `watch TARGET` | stream mail as it arrives |
+| `read TARGET [ID]` | list, or show one message |
+| `providers` | measured health matrix |
+| `canary [--concurrency N] [PROVIDER…]` | live probe, concurrent; exits 1 only on schema drift |
 | `health clear P` / `health show` | clear a quarantine / dump health |
+| `guide` | the agent manual: workflow, JSON shapes, exit and error codes (`--json` for structured) |
+| `completions SHELL` / `man` | shell completions (bash, zsh, fish, …) / roff man page |
 
-Exit codes: 0 ok, 1 error, 2 timeout.
+Every command takes `--json` (or set `INTERLOPER_JSON=1`). Results are then
+JSON on stdout, one object per line. On failure stdout is empty and stderr
+ends with one line:
+
+```json
+{"error":{"code":"rate_limited","retryable":true,"message":"…","hint":"…","retry_after_seconds":30}}
+```
+
+`code` is stable (`provider_down`, `challenge`, `solver_unavailable`,
+`rate_limited`, `schema_drift`, `message_locked`, `message_gone`,
+`not_supported`, `address_expired`, `no_provider`, `timeout`, `invalid_token`,
+`usage`, `unknown_provider`, `config`, `internal`). Retry only when
+`retryable` is true. Misspelled providers and kinds get a `did_you_mean`.
+
+| exit | meaning |
+|---|---|
+| 0 | ok |
+| 1 | anything else, including schema drift |
+| 2 | timeout: nothing arrived; retry, maybe with a longer `--timeout` |
+| 3 | usage: bad flag, unknown provider or kind, bad `--pattern`, unsupported option combination; fix the command |
+| 4 | unavailable: provider down, rate limited, challenged, no provider available; usually retryable |
+| 5 | address expired or invalid token; run `new` again |
+| 6 | message gone or locked |
+
+`interloper guide` prints these tables from the code itself, plus every
+command's flags and JSON output shape, so it cannot drift.
 
 ## Library
 
@@ -135,6 +163,7 @@ private network.
 | `INTERLOPER_SOLVER_URL` | a [cloudflare-solver](https://github.com/B00H0O/cloudflare-solver); solver-only providers join the pool when set |
 | `INTERLOPER_HEALTH_PATH` | health cache (default `$XDG_STATE_HOME/interloper/health.json`) |
 | `INTERLOPER_LOG` | tracing filter, e.g. `interloper=debug` |
+| `INTERLOPER_JSON` | `1` turns on `--json` for every command |
 
 `COWBIRD_*` equivalents are accepted.
 

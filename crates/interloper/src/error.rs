@@ -137,6 +137,56 @@ impl Error {
         }
     }
 
+    /// A stable snake_case name for this kind of failure, for scripts and
+    /// agents. These strings are an interface: never rename one.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Error::ProviderDown { .. } => "provider_down",
+            Error::Challenge { .. } => "challenge",
+            Error::SolverUnavailable(_) => "solver_unavailable",
+            Error::RateLimited { .. } => "rate_limited",
+            Error::SchemaDrift { .. } => "schema_drift",
+            Error::MessageLocked { .. } => "message_locked",
+            Error::MessageGone { .. } => "message_gone",
+            Error::NotSupported(_) => "not_supported",
+            Error::AddressExpired(_) => "address_expired",
+            Error::NoProviderAvailable { .. } => "no_provider",
+            Error::Timeout(_) => "timeout",
+            Error::InvalidToken(_) => "invalid_token",
+        }
+    }
+
+    /// Whether running the same operation again later can succeed without the
+    /// caller changing anything. Distinct from [`Error::reroutable`], which is
+    /// about trying a *different* provider right now.
+    pub fn retryable(&self) -> bool {
+        match self {
+            Error::ProviderDown { .. }
+            | Error::Challenge { .. }
+            | Error::SolverUnavailable(_)
+            | Error::RateLimited { .. }
+            | Error::Timeout(_) => true,
+            // Nothing was eligible, or every candidate failed. Retryable unless
+            // the last failure was itself a final answer.
+            Error::NoProviderAvailable { last, .. } => last.as_ref().is_none_or(|e| e.retryable()),
+            Error::SchemaDrift { .. }
+            | Error::MessageLocked { .. }
+            | Error::MessageGone { .. }
+            | Error::NotSupported(_)
+            | Error::AddressExpired(_)
+            | Error::InvalidToken(_) => false,
+        }
+    }
+
+    /// How long the provider asked the caller to wait, when it said.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Error::RateLimited { retry_after, .. } => *retry_after,
+            Error::NoProviderAvailable { last: Some(e), .. } => e.retry_after(),
+            _ => None,
+        }
+    }
+
     pub fn down(provider: impl Into<String>, detail: impl std::fmt::Display) -> Self {
         Error::ProviderDown {
             provider: provider.into(),
@@ -212,6 +262,29 @@ mod tests {
         let e = Error::drift("p", "a list", "x".repeat(10_000));
         assert_eq!(e.health_effect(), HealthEffect::Drift);
         assert!(e.to_string().len() < 400);
+    }
+
+    #[test]
+    fn codes_and_retryability() {
+        let limited = Error::RateLimited {
+            provider: "p".into(),
+            retry_after: Some(Duration::from_secs(7)),
+        };
+        assert_eq!(limited.code(), "rate_limited");
+        assert!(limited.retryable());
+        let none = Error::NoProviderAvailable {
+            tried: vec!["p".into()],
+            last: Some(Box::new(limited)),
+        };
+        assert_eq!(none.code(), "no_provider");
+        assert!(none.retryable());
+        assert_eq!(none.retry_after(), Some(Duration::from_secs(7)));
+        let unknown = Error::NoProviderAvailable {
+            tried: vec!["nope".into()],
+            last: Some(Box::new(Error::unsupported("unknown provider"))),
+        };
+        assert!(!unknown.retryable());
+        assert!(!Error::InvalidToken("x".into()).retryable());
     }
 
     #[test]

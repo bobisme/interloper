@@ -127,7 +127,9 @@ impl Config {
             None => match env(&["PORT"]) {
                 Some(p) => std::net::SocketAddr::from((
                     [0, 0, 0, 0],
-                    p.trim().parse::<u16>().map_err(|e| format!("PORT {p:?}: {e}"))?,
+                    p.trim()
+                        .parse::<u16>()
+                        .map_err(|e| format!("PORT {p:?}: {e}"))?,
                 )),
                 None => d.bind,
             },
