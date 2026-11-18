@@ -56,6 +56,9 @@ pub struct MailTm {
     api: &'static str,
     caps: Capabilities,
     http: Transport,
+    // List endpoints wrap their rows in `hydra:member` even under the pinned
+    // Accept (DuckMail does; mail.tm does not).
+    envelope: bool,
     // Re-minted tokens, by address. Address::state is immutable, so a fresh
     // token lives here for the rest of the process.
     tokens: Mutex<HashMap<String, String>>,
@@ -68,8 +71,16 @@ impl MailTm {
             api,
             caps,
             http,
+            envelope: false,
             tokens: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// For clones whose list endpoints keep the `hydra:member` envelope. A bare
+    /// array is then drift, since it means the shape moved.
+    pub fn with_envelope(mut self) -> Self {
+        self.envelope = true;
+        self
     }
 
     fn state(&self, a: &Address) -> Result<State> {
@@ -124,9 +135,14 @@ impl MailTm {
         self.http.get(&url).bearer(&fresh).send_json().await
     }
 
-    /// The rows of a list endpoint: a plain array under the pinned Accept.
+    /// The rows of a list endpoint: a plain array under the pinned Accept, or
+    /// the `hydra:member` array for a clone that keeps the envelope.
     fn rows<'a>(&self, v: &'a Value, where_: &'a str) -> Result<Vec<J<'a>>> {
-        J::new(self.name, v, where_).items()
+        let j = J::new(self.name, v, where_);
+        if self.envelope {
+            return j.at("hydra:member")?.items();
+        }
+        j.items()
     }
 }
 
