@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 interloper.workspace = true
 async-stream.workspace = true
+deadpool-postgres.workspace = true
 axum = { version = "0.8.9", features = ["macros"] }
 futures.workspace = true
 hex = "0.4"
@@ -20,6 +21,7 @@ serde_json.workspace = true
 sha2 = "0.10"
 subtle = "2.6"
 tokio.workspace = true
+tokio-postgres.workspace = true
 tower-http = { version = "0.6", features = ["cors"] }
 tracing.workspace = true
 url.workspace = true

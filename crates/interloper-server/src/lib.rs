@@ -14,9 +14,11 @@
 //! | `POST/GET /v1/webhooks`, `DELETE /v1/webhooks/{id}` | one-shot outbound webhooks |
 //!
 //! Every response is `{"success", "data", "error"}`. Auth is `X-API-Key`.
+//! With a Postgres URL, instances share addresses and health: see [`fleet`].
 
 pub mod config;
 pub mod error;
+pub mod fleet;
 pub mod ratelimit;
 pub mod service;
 pub mod store;
@@ -86,7 +88,10 @@ type St = State<Arc<AppState>>;
 
 impl AppState {
     pub fn new(config: Config, il: Interloper, store: Store) -> Arc<Self> {
-        let service = Service::new(il, store);
+        Self::from_service(config, Service::new(il, store))
+    }
+
+    pub fn from_service(config: Config, service: Arc<Service>) -> Arc<Self> {
         let webhooks = Webhooks::new(
             service.clone(),
             config.webhook_allow_private,
@@ -160,9 +165,17 @@ async fn providers(State(s): St) -> Json<Value> {
             if h.status(spec.name) == Status::Down && h.tier(spec.name).is_some() {
                 status = "probation".into();
             }
+            // Routable by this instance's own measurements, but taken out by
+            // a majority of its peers (fleet mode only).
+            let fleet_down = s.service.fleet.as_ref().is_some_and(|f| {
+                h.status(spec.name) != Status::Quarantined
+                    && f.view()
+                        .vetoes(spec.name, h.get(spec.name).as_ref(), jiff::Timestamp::now())
+            });
             json!({
                 "provider": spec.name,
                 "status": status,
+                "fleet_down": fleet_down,
                 "p50": h.p50(spec.name),
                 "kind": spec.caps.kind.iter().map(|k| k.as_str()).collect::<Vec<_>>(),
                 "sites": spec.caps.sites,
@@ -177,7 +190,7 @@ async fn clear_quarantine(State(s): St, Path(name): Path<String>) -> Result<Json
     if !s.service.il.registry().contains(&name) {
         return Err(ApiError::NotFound);
     }
-    let was = s.service.il.health().unquarantine(&name);
+    let was = s.service.clear_quarantine(&name).await?;
     Ok(Json(envelope(json!({"cleared": was}))))
 }
 
@@ -220,7 +233,7 @@ async fn create_inbox(
 }
 
 async fn list_messages(State(s): St, Path(addr): Path<String>) -> Result<Json<Value>, ApiError> {
-    let rows = s.service.inbox(&addr)?.messages().await?;
+    let rows = s.service.inbox(&addr).await?.messages().await?;
     let data: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -243,7 +256,7 @@ async fn delete_message(
     State(s): St,
     Path((addr, id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    s.service.inbox(&addr)?.delete(&id).await?;
+    s.service.inbox(&addr).await?.delete(&id).await?;
     Ok(Json(envelope(json!({"deleted": id}))))
 }
 
@@ -297,7 +310,7 @@ async fn wait(
 /// Every message as it lands, as Server-Sent Events. Long-poll `wait`
 /// answers one message per request; this holds one connection for a stream.
 async fn events(State(s): St, Path(addr): Path<String>) -> Result<impl IntoResponse, ApiError> {
-    let inbox = s.service.inbox(&addr)?;
+    let inbox = s.service.inbox(&addr).await?;
     let stream = async_stream::stream! {
         let mut mail = inbox.watch(None);
         while let Some(m) = mail.next().await {
@@ -331,7 +344,7 @@ async fn create_webhook(
 ) -> Result<Json<Value>, ApiError> {
     // Resolve first, so an address this server never issued fails now with a
     // 404 rather than later as a silent timeout.
-    s.service.inbox(&b.address)?;
+    s.service.inbox(&b.address).await?;
     if b.timeout == Some(0) {
         return Err(ApiError::BadRequest("timeout must be at least 1".into()));
     }
@@ -404,26 +417,60 @@ pub async fn serve(config: Config, il: Interloper) -> Result<(), String> {
     if config.api_keys.is_empty() {
         return Err("INTERLOPER_API_KEYS is empty; refusing to start an open server".into());
     }
-    let store = match &config.database {
+    let store = match (&config.database_url, &config.database) {
         // A silent fall back to memory while an operator believes state is
         // durable would be invisible until reads start missing.
-        Some(p) => Store::sqlite(p).map_err(|e| format!("database {}: {e}", p.display()))?,
-        None => Store::memory(),
+        (Some(url), _) => Store::postgres(url)
+            .await
+            .map_err(|e| format!("postgres database: {e}"))?,
+        (None, Some(p)) => {
+            Store::sqlite(p).map_err(|e| format!("database {}: {e}", p.display()))?
+        }
+        (None, None) => Store::memory(),
+    };
+    let fleet = match store.pg_pool() {
+        Some(pool) => {
+            let sync = fleet::HealthSync::new(
+                pool.clone(),
+                il.health().clone(),
+                config.instance_id.clone(),
+                config.health_sync_every * 3,
+            );
+            sync.load()
+                .await
+                .map_err(|e| format!("loading fleet health: {e}"))?;
+            tracing::info!(instance = %config.instance_id, "fleet mode: health shared via postgres");
+            Some(sync)
+        }
+        None => None,
     };
     let bind = config.bind;
     let every = config.maintenance_every;
-    let state = AppState::new(config, il, store);
+    let sync_every = config.health_sync_every;
+    let state = AppState::from_service(config, Service::with_fleet(il, store, fleet.clone()));
     let maint = state.clone();
     let maintenance = tokio::spawn(async move {
         loop {
             tokio::time::sleep(every).await;
             let _ = maint.service.il.save_health();
-            if let Ok(n) = maint.service.store.sweep()
+            if let Ok(n) = maint.service.store.sweep().await
                 && n > 0
             {
                 tracing::info!(reaped = n, "expired addresses swept");
             }
         }
+    });
+    // Never fatal: a database blip leaves this instance routing on its own
+    // measurements until the next round succeeds.
+    let syncer = fleet.clone().map(|f| {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(sync_every).await;
+                if let Err(e) = f.sync().await {
+                    tracing::warn!(error = %e, "fleet health sync failed; routing on local health");
+                }
+            }
+        })
     });
     let listener = tokio::net::TcpListener::bind(bind)
         .await
@@ -434,6 +481,12 @@ pub async fn serve(config: Config, il: Interloper) -> Result<(), String> {
         .with_graceful_shutdown(shutdown_signal())
         .await;
     maintenance.abort();
+    if let Some(t) = syncer {
+        t.abort();
+    }
+    if let Some(f) = &fleet {
+        let _ = f.sync().await;
+    }
     state.webhooks.shutdown();
     // Measurements taken while serving are worth keeping; a read-only disk
     // must not fail shutdown.
@@ -459,3 +512,6 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod fleet_tests;

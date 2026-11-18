@@ -18,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use jiff::{SignedDuration, Timestamp};
@@ -117,10 +117,26 @@ pub fn cooldown(failures: u32) -> Duration {
 
 type Clock = Arc<dyn Fn() -> Timestamp + Send + Sync>;
 
+/// Routing advice from outside this process, such as peers in a server fleet
+/// that share what they measured. Consulted by [`HealthStore::tier`] after the
+/// local verdict; it never sees or changes the local measurements, so nothing
+/// it says is saved or re-published as this process's own.
+pub trait TierOverlay: Send + Sync {
+    /// The tier to route at, given the local entry and the local verdict.
+    fn adjust(
+        &self,
+        provider: &str,
+        local: Option<&ProviderHealth>,
+        tier: Option<Tier>,
+        now: Timestamp,
+    ) -> Option<Tier>;
+}
+
 pub struct HealthStore {
     entries: Mutex<HashMap<String, ProviderHealth>>,
     touched: Mutex<HashSet<String>>,
     clock: Clock,
+    overlay: RwLock<Option<Arc<dyn TierOverlay>>>,
 }
 
 impl Default for HealthStore {
@@ -147,6 +163,7 @@ impl HealthStore {
             entries: Mutex::new(HashMap::new()),
             touched: Mutex::new(HashSet::new()),
             clock,
+            overlay: RwLock::new(None),
         }
     }
 
@@ -238,15 +255,27 @@ impl HealthStore {
     /// The routing tier, or `None` when the provider must not be routed to.
     pub fn tier(&self, provider: &str) -> Option<Tier> {
         let now = self.now();
-        self.read(provider, |e| match e {
-            None => Some(Tier::Healthy),
-            Some(e) => match e.status {
-                Status::Ok => Some(Tier::Healthy),
-                Status::Slow => Some(Tier::Slow),
-                Status::Down if e.retry_at.is_none_or(|t| t <= now) => Some(Tier::Probation),
-                Status::Down | Status::Quarantined => None,
-            },
+        let overlay = self.overlay.read().unwrap().clone();
+        self.read(provider, |e| {
+            let local = match e {
+                None => Some(Tier::Healthy),
+                Some(e) => match e.status {
+                    Status::Ok => Some(Tier::Healthy),
+                    Status::Slow => Some(Tier::Slow),
+                    Status::Down if e.retry_at.is_none_or(|t| t <= now) => Some(Tier::Probation),
+                    Status::Down | Status::Quarantined => None,
+                },
+            };
+            match &overlay {
+                Some(o) => o.adjust(provider, e, local, now),
+                None => local,
+            }
         })
+    }
+
+    /// Install (or with `None`, remove) a [`TierOverlay`].
+    pub fn set_overlay(&self, overlay: Option<Arc<dyn TierOverlay>>) {
+        *self.overlay.write().unwrap() = overlay;
     }
 
     pub fn p50(&self, provider: &str) -> Option<f64> {

@@ -51,6 +51,58 @@ println!("{}", inbox.email());
 let code = inbox.otp(Duration::from_secs(120)).await?;
 ```
 
+## Server
+
+`interloper serve` runs the HTTP API (`crates/interloper-server`): issue
+inboxes, list and read mail, long-poll `wait`, Server-Sent Events, one-shot
+webhooks, and the provider health matrix. Every response is
+`{"success", "data", "error"}`; auth is `X-API-Key`. Provider state stays on
+the server, so clients only ever handle the address.
+
+```bash
+INTERLOPER_API_KEYS=secret interloper serve --bind 127.0.0.1:8080
+curl -s -H 'X-API-Key: secret' -X POST localhost:8080/v1/inboxes
+curl -s -H 'X-API-Key: secret' 'localhost:8080/v1/inboxes/ADDR/wait?otp=true'
+```
+
+| env | |
+|---|---|
+| `INTERLOPER_API_KEYS` | comma-separated; the server refuses to start without one |
+| `INTERLOPER_BIND` | listen address (default `127.0.0.1:8080`) |
+| `INTERLOPER_DATABASE` | SQLite file for issued addresses (default: memory) |
+| `INTERLOPER_DATABASE_URL` | Postgres URL: turns on fleet mode (below); not with `INTERLOPER_DATABASE` |
+| `INTERLOPER_INSTANCE_ID` | this instance's name in fleet mode (default `$HOSTNAME`); unique per instance |
+| `INTERLOPER_HEALTH_SYNC_SECONDS` | fleet health sync interval (default 5) |
+| `INTERLOPER_RATE_LIMIT` | per key and IP, e.g. `30/minute` |
+| `INTERLOPER_WAIT_MAX`, `INTERLOPER_WAIT_DEFAULT`, `INTERLOPER_WEBHOOK_MAX` | seconds |
+| `INTERLOPER_WEBHOOK_SECRET`, `INTERLOPER_WEBHOOK_ALLOW_PRIVATE` | webhook signing; SSRF guard off (local only) |
+| `INTERLOPER_ALLOWED_ORIGINS` | CORS allow-list |
+
+### Fleet mode
+
+Point several instances at one Postgres (`INTERLOPER_DATABASE_URL`) and put
+any load balancer in front; no sticky sessions are needed. The schema is
+created on startup. `compose.yaml` runs Postgres and two servers.
+
+- **Addresses are shared.** Any instance serves an address another one
+  issued, with the provider state it was issued with.
+- **Quarantine is global.** Schema drift seen by one instance quarantines the
+  provider on all of them; `DELETE /v1/providers/{name}/quarantine` on any
+  instance clears it on all of them within one sync.
+- **Peers' failures steer routing.** Each instance publishes its health
+  every sync and reads its peers' fresh rows (rows older than three sync
+  intervals, by the database clock, are ignored). A provider leaves routing
+  when a strict majority of the instances with recent evidence see it DOWN
+  inside its cooldown; ties keep it in. Peers can only take a provider out,
+  never put back one this instance saw fail, and their verdicts lapse with
+  the voters' own cooldowns. Challenge-driven failures do not vote: they
+  are about one instance's IP. `GET /v1/providers` shows `fleet_down` when
+  peers, not local measurements, are what keeps a provider out.
+
+cowbird shared quarantine but not DOWN, so each instance paid its own failed
+calls to learn a provider had died. Plain TCP only: keep Postgres on a
+private network.
+
 ## What is better than cowbird
 
 - **Providers recover.** A DOWN provider is a circuit breaker with a

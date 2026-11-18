@@ -1,0 +1,56 @@
+# Fleet mode locally: one Postgres and two interloper servers sharing it.
+# Either server serves an address the other issued, a provider one of them
+# just saw fail is skipped by the other, and a quarantine cleared on one is
+# cleared on both.
+#
+#   docker compose up --build        # or: podman compose up --build
+#   curl -s -H 'X-API-Key: local-dev' -X POST localhost:8001/v1/inboxes
+#   curl -s -H 'X-API-Key: local-dev' localhost:8002/v1/inboxes/ADDRESS/messages
+#
+# Put any load balancer in front of 8001/8002; no sticky sessions are needed.
+services:
+  postgres:
+    image: docker.io/library/postgres:17
+    # Literal password is deliberate: a local throwaway container credential.
+    # Nothing in a deploy reads this file.
+    environment:
+      POSTGRES_USER: interloper
+      POSTGRES_PASSWORD: interloper
+      POSTGRES_DB: interloper
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      # pg_isready can pass a moment before first-boot connections are
+      # accepted; the servers fail fast and `restart` covers that window.
+      test: ["CMD-SHELL", "pg_isready -U interloper -d interloper"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  server-1: &server
+    image: interloper:latest
+    build: .
+    entrypoint: ["interloper"]
+    command: ["serve"]
+    restart: on-failure
+    environment: &env
+      INTERLOPER_BIND: 0.0.0.0:8000
+      INTERLOPER_API_KEYS: local-dev
+      INTERLOPER_DATABASE_URL: postgres://interloper:interloper@postgres:5432/interloper
+      # Unique per instance: it keys the instance's row in the health table.
+      INTERLOPER_INSTANCE_ID: server-1
+      INTERLOPER_HEALTH_SYNC_SECONDS: "2"
+      INTERLOPER_LOG: interloper=info,interloper_server=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8001:8000"
+
+  server-2:
+    <<: *server
+    environment:
+      <<: *env
+      INTERLOPER_INSTANCE_ID: server-2
+    ports:
+      - "8002:8000"

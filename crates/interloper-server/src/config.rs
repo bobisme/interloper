@@ -24,8 +24,22 @@ pub struct Config {
     pub webhook_allow_private: bool,
     /// SQLite file for issued addresses. `None` keeps them in memory.
     pub database: Option<PathBuf>,
+    /// Postgres URL. Turns on fleet mode: addresses and health shared with
+    /// every instance pointed at the same database.
+    pub database_url: Option<String>,
+    /// This instance's name in the shared health table. Must be unique per
+    /// instance: two sharing an id overwrite each other's row.
+    pub instance_id: String,
+    /// How often fleet health is published and peers' rows read back. A
+    /// peer's row older than three of these is ignored.
+    pub health_sync_every: Duration,
     /// How often health is flushed to disk and expired addresses reaped.
     pub maintenance_every: Duration,
+}
+
+/// `$HOSTNAME` (a container's id under Docker/Podman), else a random name.
+fn default_instance_id() -> String {
+    env(&["HOSTNAME"]).unwrap_or_else(|| format!("il-{:08x}", rand::random::<u32>()))
 }
 
 impl Default for Config {
@@ -41,6 +55,9 @@ impl Default for Config {
             webhook_secret: None,
             webhook_allow_private: false,
             database: None,
+            database_url: None,
+            instance_id: default_instance_id(),
+            health_sync_every: Duration::from_secs(5),
             maintenance_every: Duration::from_secs(30),
         }
     }
@@ -121,6 +138,15 @@ impl Config {
         };
         let allow_private = env(&["INTERLOPER_WEBHOOK_ALLOW_PRIVATE", "WEBHOOK_ALLOW_PRIVATE"])
             .is_some_and(|v| matches!(v.trim(), "1" | "true" | "yes"));
+        let database = env(&["INTERLOPER_DATABASE", "DATABASE_PATH"]).map(PathBuf::from);
+        let database_url = env(&["INTERLOPER_DATABASE_URL", "COWBIRD_DATABASE_URL"]);
+        if database.is_some() && database_url.is_some() {
+            // Which one holds the addresses must never be a guess.
+            return Err(
+                "set INTERLOPER_DATABASE (SQLite) or INTERLOPER_DATABASE_URL (Postgres), not both"
+                    .into(),
+            );
+        }
         Ok(Config {
             bind,
             api_keys: csv(env(&["INTERLOPER_API_KEYS", "API_KEYS"])),
@@ -131,7 +157,13 @@ impl Config {
             webhook_max: secs(&["INTERLOPER_WEBHOOK_MAX", "WEBHOOK_MAX"], d.webhook_max)?,
             webhook_secret: env(&["INTERLOPER_WEBHOOK_SECRET", "WEBHOOK_SECRET"]),
             webhook_allow_private: allow_private,
-            database: env(&["INTERLOPER_DATABASE", "DATABASE_PATH"]).map(PathBuf::from),
+            database,
+            database_url,
+            instance_id: env(&["INTERLOPER_INSTANCE_ID", "INSTANCE_ID"]).unwrap_or(d.instance_id),
+            health_sync_every: secs(
+                &["INTERLOPER_HEALTH_SYNC_SECONDS", "HEALTH_FLUSH_SECONDS"],
+                d.health_sync_every,
+            )?,
             maintenance_every: d.maintenance_every,
         })
     }
