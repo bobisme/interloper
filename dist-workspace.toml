@@ -19,6 +19,8 @@ hosting = "github"
 install-updater = false
 # Release only on version tags; never spend runner time on pull requests.
 pr-run-mode = "skip"
+# Relative to .github/workflows.
+github-build-setup = "../build-setup.yml"
 
 # BoringSSL (wreq's TLS) builds from source: cmake, plus libclang for bindgen.
 [dist.dependencies.apt]
