@@ -32,3 +32,9 @@ tracing-subscriber.workspace = true
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.xz"
 bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "txz"
+
+# dist ships Windows as a .zip with the binary at its root.
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.zip"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "zip"

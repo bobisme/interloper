@@ -11,12 +11,18 @@ namesake it owns no mail infrastructure and uses everyone else's.
 
 ## Install
 
-Prebuilt binaries for Linux and macOS (x86_64 and arm64), no compiler needed:
+Prebuilt binaries for Linux and macOS (x86_64 and arm64) and Windows
+(x86_64), no compiler needed:
 
 ```bash
 cargo binstall interloper-cli
-# or
+# or, on Linux and macOS
 curl -LsSf https://github.com/bobisme/interloper/releases/latest/download/interloper-cli-installer.sh | sh
+```
+
+```powershell
+# or, on Windows
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/bobisme/interloper/releases/latest/download/interloper-cli-installer.ps1 | iex"
 ```
 
 From source:

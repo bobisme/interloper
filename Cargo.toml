@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/bobisme/interloper"
@@ -12,8 +12,8 @@ readme = "README.md"
 rust-version = "1.90"
 
 [workspace.dependencies]
-interloper = { path = "crates/interloper", version = "0.1.1" }
-interloper-server = { path = "crates/interloper-server", version = "0.1.1" }
+interloper = { path = "crates/interloper", version = "0.1.2" }
+interloper-server = { path = "crates/interloper-server", version = "0.1.2" }
 async-trait = "0.1.89"
 async-stream = "0.3"
 base64 = "0.22"

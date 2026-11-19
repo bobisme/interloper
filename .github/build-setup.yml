@@ -1,0 +1,6 @@
+# Extra steps cargo-dist runs before each build (see dist-workspace.toml).
+# BoringSSL's CMake enables the NASM assembler on Windows even when building
+# without assembly, and windows-2022 does not ship NASM.
+- name: Install NASM (Windows)
+  if: runner.os == 'Windows'
+  uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1
