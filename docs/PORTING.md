@@ -1,6 +1,6 @@
 # Porting a cowbird adapter
 
-Source of truth for behavior: `~/repos/cowbird/packages/providers/<name>/`
+Source of truth for behavior: [cowbird](https://github.com/Pranjal-SB/cowbird)'s `packages/providers/<name>/`
 (`src/cowbird_<name>/__init__.py`, `tests/test_contract.py`,
 `tests/fixtures/`). Templates here: `src/providers/mailtm.rs` (account +
 token state), `guerrillamail.rs` (session id in state, `fresh_session`),

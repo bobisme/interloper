@@ -1,9 +1,8 @@
 name: ci
 
+# Manual only for now: Actions > ci > Run workflow.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,7 +47,6 @@ jobs:
   canary:
     # Live probe of every provider. Never blocks a merge: providers break on
     # their own schedule, and quarantine (schema drift) is what needs a human.
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:

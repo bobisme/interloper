@@ -1,9 +1,13 @@
 # interloper
 
+![A dark songbird perched on a row of nest-shaped mailboxes; one holds an envelope like a speckled egg](docs/banner.webp)
+
 Disposable-email backends behind one interface: generate an address, wait for
-a message, extract an OTP or a link, done. A Rust rewrite of
-[cowbird](../../repos/cowbird). Like its namesake it owns no mail
-infrastructure and uses everyone else's.
+a message, extract an OTP or a link, done. 32 providers, one CLI, one HTTP
+API, built for scripts and AI agents.
+
+A Rust rewrite of [cowbird](https://github.com/Pranjal-SB/cowbird). Like its
+namesake it owns no mail infrastructure and uses everyone else's.
 
 ## CLI
 
@@ -156,6 +160,11 @@ works with its connection string as given.
 - **Fixtures replace only the wire**, so retry, 429, 5xx and challenge logic
   run under test exactly as in production.
 - **Concurrent CLI processes merge health** instead of overwriting each other.
+- **Built for agents.** `--json` everywhere, one JSON error object with a
+  stable code, a `retryable` flag and a hint; distinct exit codes;
+  `interloper guide` prints a manual generated from the code itself.
+- **Fleet mode.** Several servers share issued addresses, health and
+  quarantine through Postgres.
 - One static binary with a real Chrome TLS/HTTP2 fingerprint (BoringSSL via
   `wreq`). No Python, no curl_cffi.
 
@@ -175,9 +184,26 @@ works with its connection string as given.
 
 ```bash
 cargo test                                   # offline, the default gate
-INTERLOPER_DELIVERY=mailtm cargo test -p interloper --features live \
-  --test delivery -- --nocapture             # real mail, rationed sender
+interloper canary                            # live: can each provider issue and list?
+INTERLOPER_DELIVERY=all cargo test -p interloper --features live \
+  --test delivery -- --nocapture             # live: does real mail arrive and parse?
 ```
 
 Every adapter runs the shared contract suite (`contract_tests!`) against
 recorded fixtures. Porting guide: [docs/PORTING.md](docs/PORTING.md).
+
+The delivery test sends each inbox its own random code and link and checks
+both come back exactly. With `INTERLOPER_RESEND_KEY` and
+`INTERLOPER_SENDER_FROM` (an address at a domain verified in
+[Resend](https://resend.com)) it sends through Resend, six providers at a
+time; otherwise it falls back to the keyless, rationed JoltMx test sender.
+`INTERLOPER_DELIVERY` takes a comma list, `provider:domain` to pin a domain,
+or `all`.
+
+## License
+
+AGPL-3.0-or-later, the same as [cowbird](https://github.com/Pranjal-SB/cowbird),
+which interloper ports: provider behavior and many test fixtures come from it.
+See [LICENSE](LICENSE). The optional solver image in `deploy/solver` builds
+[cloudflare-solver](https://github.com/B00H0O/cloudflare-solver) (MIT) from a
+pinned commit.
