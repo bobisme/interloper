@@ -4,6 +4,11 @@ description = "The interloper command: disposable inboxes from the shell."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["email", "disposable-email", "temp-mail", "otp", "cli"]
+categories = ["email", "command-line-utilities"]
 
 [[bin]]
 name = "interloper"
@@ -11,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 interloper.workspace = true
-interloper-server = { path = "../interloper-server" }
+interloper-server.workspace = true
 clap.workspace = true
 clap_complete = "4.6"
 clap_mangen = "0.3"

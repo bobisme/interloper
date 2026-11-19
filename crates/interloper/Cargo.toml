@@ -4,6 +4,13 @@ description = "Disposable-email backends behind one interface: generate an addre
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["email", "disposable-email", "temp-mail", "otp", "inbox"]
+categories = ["email", "web-programming::http-client"]
+# Fixtures are for the test suite only.
+exclude = ["fixtures/"]
 
 [dependencies]
 async-trait.workspace = true

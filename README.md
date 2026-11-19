@@ -1,6 +1,6 @@
 # interloper
 
-![A dark songbird perched on a row of nest-shaped mailboxes; one holds an envelope like a speckled egg](docs/banner.webp)
+![A dark songbird perched on a row of nest-shaped mailboxes; one holds an envelope like a speckled egg](https://raw.githubusercontent.com/bobisme/interloper/main/docs/banner.webp)
 
 Disposable-email backends behind one interface: generate an address, wait for
 a message, extract an OTP or a link, done. 32 providers, one CLI, one HTTP
@@ -8,6 +8,20 @@ API, built for scripts and AI agents.
 
 A Rust rewrite of [cowbird](https://github.com/Pranjal-SB/cowbird). Like its
 namesake it owns no mail infrastructure and uses everyone else's.
+
+## Install
+
+```bash
+cargo install interloper-cli      # installs the `interloper` binary
+```
+
+Building needs `cmake` and `clang`: the TLS stack is BoringSSL, compiled from
+source, which is what lets requests carry a real Chrome fingerprint. For the
+library, `cargo add interloper`. A container image builds from the
+[Dockerfile](Dockerfile).
+
+Shell completions and a man page: `interloper completions <shell>`,
+`interloper man`.
 
 ## CLI
 

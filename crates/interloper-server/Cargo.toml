@@ -4,6 +4,11 @@ description = "HTTP API over interloper: issue inboxes, read mail, long-poll, SS
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["email", "disposable-email", "temp-mail", "otp", "webhooks"]
+categories = ["email", "web-programming::http-server"]
 
 [dependencies]
 interloper.workspace = true
