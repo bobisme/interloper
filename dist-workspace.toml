@@ -18,7 +18,7 @@ hosting = "github"
 # Whether to install an updater program
 install-updater = false
 # Release only on version tags; never spend runner time on pull requests.
-pr-run-mode = "skip"
+pr-run-mode = "upload"
 # Relative to .github/workflows.
 github-build-setup = "../build-setup.yml"
 

@@ -39,6 +39,7 @@ permissions:
 # If there's a prerelease-style suffix to the version, then the release(s)
 # will be marked as a prerelease.
 on:
+  pull_request:
   push:
     tags:
       - '**[0-9]+.[0-9]+.[0-9]+*'
@@ -129,6 +130,10 @@ jobs:
       - name: "Install NASM (Windows)"
         uses: "ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b"
         if: "runner.os == 'Windows'"
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ join(matrix.targets, '-') }}
+          cache-provider: ${{ matrix.cache_provider }}
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
