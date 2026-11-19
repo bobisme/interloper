@@ -11,6 +11,16 @@ namesake it owns no mail infrastructure and uses everyone else's.
 
 ## Install
 
+Prebuilt binaries for Linux and macOS (x86_64 and arm64), no compiler needed:
+
+```bash
+cargo binstall interloper-cli
+# or
+curl -LsSf https://github.com/bobisme/interloper/releases/latest/download/interloper-cli-installer.sh | sh
+```
+
+From source:
+
 ```bash
 cargo install interloper-cli      # installs the `interloper` binary
 ```

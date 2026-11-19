@@ -1359,7 +1359,7 @@ dependencies = [
 
 [[package]]
 name = "interloper"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1387,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "interloper-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "clap_complete",
@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "interloper-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "axum",

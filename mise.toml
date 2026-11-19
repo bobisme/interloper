@@ -1,0 +1,5 @@
+[tools]
+"aqua:axodotdev/cargo-dist" = "0.34.0"
+
+[tasks.install]
+run = "cargo install --locked --path crates/interloper-cli"
