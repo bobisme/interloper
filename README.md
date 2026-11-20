@@ -1,6 +1,6 @@
 # interloper
 
-![A dark songbird perched on a row of nest-shaped mailboxes; one holds an envelope like a speckled egg](https://raw.githubusercontent.com/bobisme/interloper/main/docs/banner.webp)
+![Interloper — Disposable inboxes for scripts and agents. A hooded courier draws a letter from a pigeonhole beneath a perched cowbird.](docs/banner.webp)
 
 Disposable-email backends behind one interface: generate an address, wait for
 a message, extract an OTP or a link, done. 32 providers, one CLI, one HTTP
